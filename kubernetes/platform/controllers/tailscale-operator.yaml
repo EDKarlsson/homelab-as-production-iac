@@ -1,0 +1,57 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tailscale
+  labels:
+    toolkit.fluxcd.io/tenant: sre-team
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: tailscale
+  namespace: tailscale
+spec:
+  interval: 24h
+  url: http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/helm-tailscale/
+---
+# Prerequisites before this HelmRelease will reconcile:
+#   1. ACL tags configured in Tailscale admin (tag:k8s-operator, tag:k8s)
+#   2. OAuth client created with Devices Core, Auth Keys, Services write scopes
+#   3. K8s Secret created in tailscale namespace:
+#
+#      kubectl create secret generic tailscale-operator-oauth \
+#        --namespace=tailscale \
+#      Or run: ./scripts/k8s/create-tailscale-secret.sh
+#
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tailscale-operator
+  namespace: tailscale
+spec:
+  interval: 30m
+  install:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: tailscale-operator
+      version: "1.x"
+      sourceRef:
+        kind: HelmRepository
+        name: tailscale
+        namespace: tailscale
+      interval: 12h
+  values:
+    apiServerProxyConfig:
+      mode: "true"
+  valuesFrom:
+    - kind: Secret
+      name: tailscale-operator-oauth
+      valuesKey: clientId
+      targetPath: oauth.clientId
+    - kind: Secret
+      name: tailscale-operator-oauth
+      valuesKey: clientSecret
+      targetPath: oauth.clientSecret

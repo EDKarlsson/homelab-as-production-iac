@@ -1,0 +1,62 @@
+# YouTrack requires 4 persistent volumes:
+#   - data: Xodus embedded DB — needs POSIX fsync (NFS not supported, Longhorn OK)
+#   - conf: configuration files
+#   - logs: application logs
+#   - backups: built-in backup snapshots
+#
+# Data PVC uses Longhorn (block storage with POSIX semantics).
+# Migrated from local-path to enable Velero CSI snapshots and 2-replica protection.
+# Migration requires: scale to 0, copy data via temp pod, scale back up.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: youtrack-data
+  namespace: youtrack
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  volumeName: pvc-c5a32694-2926-4cb3-b42a-91e60f4341f1
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: youtrack-conf
+  namespace: youtrack
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: youtrack-logs
+  namespace: youtrack
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: youtrack-backups
+  namespace: youtrack
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 20Gi

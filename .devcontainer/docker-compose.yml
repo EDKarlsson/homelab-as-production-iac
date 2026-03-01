@@ -1,0 +1,10 @@
+services:
+    bastion:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        volumes:
+          - ..:/workspace:cached
+          - ${HOME}/.ssh:/home/odin/.ssh:cached
+
+        command: sleep infinity

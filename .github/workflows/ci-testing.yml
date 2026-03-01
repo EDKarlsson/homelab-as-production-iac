@@ -1,0 +1,365 @@
+name: CI - Validation and Testing
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_homelab_smoke:
+        description: "Run optional self-hosted homelab smoke tests"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Changed Areas
+    runs-on: ubuntu-latest
+    outputs:
+      terraform: ${{ steps.filter.outputs.terraform }}
+      ansible: ${{ steps.filter.outputs.ansible }}
+      ansible_files: ${{ steps.filter.outputs.ansible_files }}
+      kubernetes: ${{ steps.filter.outputs.kubernetes }}
+      scripts: ${{ steps.filter.outputs.scripts }}
+      scripts_files: ${{ steps.filter.outputs.scripts_files }}
+      docs: ${{ steps.filter.outputs.docs }}
+      ci_artifacts: ${{ steps.filter.outputs.ci_artifacts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          list-files: csv
+          filters: |
+            terraform:
+              - "infrastructure/**/*.tf"
+            ansible:
+              - "ansible/**/*.yml"
+              - "ansible/**/*.yaml"
+              - "ansible/**/*.j2"
+              - "ansible.cfg"
+            kubernetes:
+              - "clusters/**/*.yaml"
+              - "clusters/**/*.yml"
+              - "kubernetes/**/*.yaml"
+              - "kubernetes/**/*.yml"
+            scripts:
+              - "scripts/**/*.sh"
+            ci_artifacts:
+              - "scripts/ci/**/*.sh"
+              - "ci/allowlists/**/*.txt"
+              - ".github/workflows/ci-testing.yml"
+            docs:
+              - "docs/**/*.md"
+              - ".github/workflows/**/*.yml"
+              - ".github/workflows/**/*.yaml"
+              - ".mcp*.json"
+              - "configs/mcp/**/*.json"
+
+  terraform:
+    name: Terraform Validate
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive infrastructure
+
+      - name: Validate all Terraform directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t tf_dirs < <(find infrastructure -name '*.tf' -printf '%h\n' | sort -u)
+          for dir in "${tf_dirs[@]}"; do
+            echo "==> terraform init/validate in ${dir}"
+            terraform -chdir="${dir}" init -backend=false -input=false -no-color >/dev/null
+            terraform -chdir="${dir}" validate -no-color
+          done
+
+      - name: TFLint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t tf_dirs < <(find infrastructure -name '*.tf' -printf '%h\n' | sort -u)
+          for dir in "${tf_dirs[@]}"; do
+            echo "==> tflint in ${dir}"
+            tflint --chdir "${dir}" --init
+            tflint --chdir "${dir}"
+          done
+
+  ansible:
+    name: Ansible Syntax and Sanity
+    needs: changes
+    if: needs.changes.outputs.ansible == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Ansible tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core ansible-lint
+          ansible-galaxy collection install ansible.posix community.general artis3n.tailscale onepassword.connect community.postgresql
+
+      - name: Ansible syntax checks
+        run: |
+          ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/k3s-cluster.yml --syntax-check
+          ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/k3s-upgrade.yml --syntax-check -e k3s_version=v1.32.12+k3s1
+          ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/pg-backup.yml --syntax-check
+          ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/k3s-registry-mirrors.yml --syntax-check -e nexus_registry_mirror_url=localhost:8081
+          ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/pg-create-db.yml --syntax-check -e db_name=test -e db_user=test -e db_password=test
+
+      - name: Ansible lint (playbooks and templates)
+        shell: bash
+        env:
+          ANSIBLE_FILES: ${{ needs.changes.outputs.ansible_files }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANSIBLE_FILES}" ]]; then
+            echo "No changed Ansible files found; linting full ansible tree."
+            ansible-lint ansible/playbooks ansible/templates
+            exit 0
+          fi
+
+          echo "${ANSIBLE_FILES}" | tr ',' '\n' | sed '/^$/d' > /tmp/ansible-files.txt
+          echo "Linting changed Ansible files:"
+          cat /tmp/ansible-files.txt
+          xargs -r ansible-lint < /tmp/ansible-files.txt
+
+  kubernetes_flux:
+    name: Kubernetes and Flux Validation
+    needs: changes
+    if: needs.changes.outputs.kubernetes == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: "5.4.2"
+
+      - name: Install yq and kubeconform
+        shell: bash
+        run: |
+          set -euo pipefail
+          YQ_VERSION=v4.44.5
+          KUBECONFORM_VERSION=v0.6.7
+
+          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -o /tmp/kubeconform.tgz
+          tar -xzf /tmp/kubeconform.tgz -C /tmp kubeconform
+          sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
+          sudo chmod +x /usr/local/bin/kubeconform
+
+      - name: Validate manifests and overlays
+        run: bash scripts/k8s/validate.sh
+
+      - name: Policy checks (latest tags and wildcard chart versions)
+        run: bash scripts/ci/policy-check.sh
+
+  shell_scripts:
+    name: Shell Script Lint
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        shell: bash
+        env:
+          SCRIPT_FILES: ${{ needs.changes.outputs.scripts_files }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SCRIPT_FILES}" ]]; then
+            echo "No changed shell scripts to lint."
+            exit 0
+          fi
+
+          # Exclude _archive/ — deprecated scripts not maintained
+          echo "${SCRIPT_FILES}" | tr ',' '\n' | sed '/^$/d' | grep -v '_archive/' > /tmp/script-files.txt || true
+          if [[ ! -s /tmp/script-files.txt ]]; then
+            echo "No non-archive shell scripts to lint."
+            exit 0
+          fi
+          echo "Linting files:"
+          cat /tmp/script-files.txt
+          xargs -r shellcheck -x < /tmp/script-files.txt
+
+  homelab_smoke:
+    name: Optional Homelab Smoke Tests
+    needs: changes
+    if: (github.event_name == 'workflow_dispatch' && github.event.inputs.run_homelab_smoke == 'true') || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.kubernetes == 'true' && vars.ENABLE_AUTO_SMOKE == 'true')
+    runs-on: [self-hosted, linux, homelab]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run homelab smoke script
+        run: bash scripts/ci/homelab-smoke.sh
+
+  artifact_bundle:
+    name: Build CI Artifacts
+    needs: changes
+    if: needs.changes.outputs.ci_artifacts == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_version: ${{ steps.meta.outputs.artifact_version }}
+      bundle_file: ${{ steps.build.outputs.bundle_file }}
+      provenance_file: ${{ steps.build.outputs.provenance_file }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive artifact version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            version="pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME}"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            version="main-${GITHUB_SHA::7}"
+          else
+            ref_slug="$(echo "${GITHUB_REF_NAME}" | tr '/' '-')"
+            version="${ref_slug}-${GITHUB_SHA::7}"
+          fi
+          echo "artifact_version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build bundle + provenance
+        id: build
+        env:
+          ARTIFACT_VERSION: ${{ steps.meta.outputs.artifact_version }}
+          GIT_REF: ${{ github.ref }}
+        run: |
+          bash scripts/ci/build-artifacts.sh dist/ci-artifacts
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-${{ steps.meta.outputs.artifact_version }}
+          path: |
+            dist/ci-artifacts/${{ steps.build.outputs.bundle_file }}
+            dist/ci-artifacts/${{ steps.build.outputs.provenance_file }}
+          if-no-files-found: error
+          retention-days: 14
+
+  artifact_publish_raw:
+    name: Publish CI Artifacts to Nexus
+    needs: artifact_bundle
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, homelab]  # Nexus is Tailscale-only; needs homelab runner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifact bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-artifacts-${{ needs.artifact_bundle.outputs.artifact_version }}
+          path: dist/ci-artifacts
+
+      - name: Evaluate publish prerequisites
+        id: gate
+        shell: bash
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_CI_USERNAME: ${{ secrets.NEXUS_CI_USERNAME }}
+          NEXUS_CI_PASSWORD: ${{ secrets.NEXUS_CI_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NEXUS_URL}" || -z "${NEXUS_CI_USERNAME}" || -z "${NEXUS_CI_PASSWORD}" ]]; then
+            echo "publish=false" >> "${GITHUB_OUTPUT}"
+            echo "Nexus publish skipped: required secrets are not configured."
+          else
+            echo "publish=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Publish to Nexus raw repository
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_CI_USERNAME: ${{ secrets.NEXUS_CI_USERNAME }}
+          NEXUS_CI_PASSWORD: ${{ secrets.NEXUS_CI_PASSWORD }}
+          NEXUS_RAW_REPO: ${{ vars.NEXUS_RAW_REPO }}
+        run: |
+          bash scripts/ci/publish-nexus-raw.sh \
+            "homelab-iac/ci-bundles/${{ needs.artifact_bundle.outputs.artifact_version }}" \
+            "dist/ci-artifacts/${{ needs.artifact_bundle.outputs.bundle_file }}" \
+            "dist/ci-artifacts/${{ needs.artifact_bundle.outputs.provenance_file }}"
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - terraform
+      - ansible
+      - kubernetes_flux
+      - shell_scripts
+      - homelab_smoke
+      - artifact_bundle
+      - artifact_publish_raw
+    if: always()
+    steps:
+      - name: Check status
+        shell: bash
+        run: |
+          set -euo pipefail
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.terraform.result }}" \
+            "${{ needs.ansible.result }}" \
+            "${{ needs.kubernetes_flux.result }}" \
+            "${{ needs.shell_scripts.result }}" \
+            "${{ needs.homelab_smoke.result }}" \
+            "${{ needs.artifact_bundle.result }}" \
+            "${{ needs.artifact_publish_raw.result }}"; do
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "CI failed due to job result: $result"
+              exit 1
+            fi
+          done
+          echo "CI checks passed."

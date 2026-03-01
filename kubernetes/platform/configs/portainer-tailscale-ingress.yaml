@@ -1,0 +1,20 @@
+---
+# Tailscale Ingress for Portainer — remote access via tailnet.
+# Accessible at https://portainer.<tailnet>.ts.net
+# TLS handled automatically by Tailscale (Let's Encrypt).
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portainer-tailscale
+  namespace: portainer
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: portainer
+      port:
+        number: 9000
+  tls:
+    - hosts:
+        - portainer

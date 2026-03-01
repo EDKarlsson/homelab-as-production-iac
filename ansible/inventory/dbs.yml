@@ -1,0 +1,22 @@
+# A list of managed nodes provided by one or more ‘inventory sources’. Your 
+#   inventory can specify information specific to each node, like IP address.
+#   It is also used for assigning groups, that both allow for node selection 
+#   in the Play and bulk variable assignment.
+    
+# Bare Metal Proxmox VE Hosts
+databases:
+  hosts:
+    dbserver*:
+  vars:
+    ansible_connection: ssh
+    ansible_private_key_file: ~/.ssh/homelab/pve/root_ed25519
+
+prod:
+  hosts:
+    pvenode1:
+    pvenode2:
+    pvenode4:
+
+test:
+  hosts:
+    pvenode3:

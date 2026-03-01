@@ -1,0 +1,11 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: plex
+  namespace: media
+spec:
+  interval: 5m
+  # Upstream: https://raw.githubusercontent.com/plexinc/pms-docker/gh-pages
+  # Plex has no official Helm chart registry — this raw GitHub Pages URL
+  # is the only published chart source (community-maintained).
+  url: http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/helm-plex/

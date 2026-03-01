@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dependency-track
+  namespace: dependency-track
+  annotations:
+    cert-manager.io/cluster-issuer: homelab-ca-issuer
+    # Dependency-Track uploads can be large (SBOM files); raise the body size limit
+    nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+    # oauth2-proxy removed: DT uses native OIDC (Keycloak PKCE) for auth
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dependency-track.10.0.0.201.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dependency-track
+                port:
+                  number: 8080
+  tls:
+    - secretName: dependency-track-tls
+      hosts:
+        - dependency-track.10.0.0.201.nip.io

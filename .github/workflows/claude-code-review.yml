@@ -1,0 +1,124 @@
+name: Claude Code Review
+
+on:
+  workflow_dispatch:  # Disabled auto-run on PRs — takes too long and doesn't publish to review section
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are reviewing a pull request for a homelab IaC monorepo. The stack is:
+            Proxmox (5 nodes) → K3s Kubernetes (3 servers + 5 agents) → 20+ apps via FluxCD GitOps.
+            Secrets flow through 1Password Connect → ESO → Kubernetes Secrets.
+            All cluster access is via Tailscale — no public internet exposure.
+
+            PR: ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            ## Your task
+
+            Review the PR diff and post a structured review comment. Use `gh pr diff ${{ github.event.pull_request.number }}` to get the diff.
+
+            Apply the following checks in order. Only flag issues that are actually present in the diff — do not hallucinate findings.
+
+            ---
+
+            ## 1. Security (High priority — flag any violation)
+
+            - **No secrets hardcoded**: tokens, passwords, private keys must not appear in diffs. Flag anything that looks like a credential.
+            - **No TLS bypass**: `ssl-insecure-skip-verify: true`, `insecureSkipVerify`, `verify_ssl: false` are banned.
+            - **No relaxed SSH host key checking**: `StrictHostKeyChecking=no` or `known_hosts_file=/dev/null` are banned.
+            - **No unapproved providers**: Terraform providers must be in the approved list. Check `ci/allowlists/` for exceptions.
+
+            ---
+
+            ## 2. Kubernetes / Flux
+
+            - **No `:latest` image tags**: flag any `image: foo:latest` unless the image name appears in `ci/allowlists/image-tag-latest.txt`.
+            - **No wildcard chart versions**: Helm chart `version: "*"` or `version: ">=x"` are banned.
+            - **ExternalSecret API version**: must use `external-secrets.io/v1`, not `v1beta1` (removed in ESO 2.x).
+            - **1Password ESO fields**: ESO `property:` references must use custom text field names, never default Login fields (`username`, `password`, `url` — these are NOT addressable). Flag if `property: username` or `property: password` appears.
+            - **Flux dependency chain**: New controllers belong in `kubernetes/platform/controllers/`. Anything consuming CRDs belongs in `platform/configs/` or `apps/`. Flag if this ordering is violated.
+            - **Dual ingress**: New apps should have both an nginx ingress (LAN, nip.io) and a Tailscale ingress (remote, *.ts.net). Flag if only one is present.
+            - **HelmRelease remediation**: HelmReleases should include `install.remediation.retries: 3`. Flag if absent on new HelmReleases.
+            - **Flux Kustomization atomicity**: note if a Kustomization mixes stable resources with potentially-failing ones — one failure blocks all resources.
+
+            ---
+
+            ## 3. Terraform
+
+            - **Template escaping**: In `.tftpl` files, bash `${...}` syntax (e.g. `${#array[@]}`, `${var}`) must be escaped as `$${...}`. Terraform's `templatefile()` parses `${` as a template expression. Flag any unescaped bash variable/array syntax in `.tftpl` files.
+            - **Cloud-init lifecycle**: VMs with an `initialization` block should have `lifecycle { ignore_changes = [initialization] }` — cloud-init only runs on first boot.
+            - **No PROXMOX_VE_* env vars**: these silently override the provider block. Flag if referenced in scripts or CI.
+            - **Provider version pinning**: Terraform providers must pin versions. Flag unpinned `source` blocks.
+            - **SSH provider username**: bpg/proxmox SSH username must be `root`, not a PVE API user.
+
+            ---
+
+            ## 4. Ansible
+
+            - **Rolling operations**: Playbooks that restart services across nodes must use `serial: 1` to avoid simultaneous downtime.
+            - **Privilege escalation**: Tasks requiring root must have `become: true`. Flag missing `become` on system-level tasks.
+            - **1Password SSH agent**: Playbooks touching cluster nodes should note `--forks=1` in usage comments (agent prompts per-connection).
+            - **No hardcoded IPs**: IPs that belong in `group_vars` (e.g. Nexus URL, K3s API endpoint) should use variables, not literals.
+            - **Template paths**: Ansible template `src:` paths should use `{{ playbook_dir | dirname }}/templates/` pattern, not relative `../` paths (triggers ansible-lint).
+
+            ---
+
+            ## 5. Documentation checks
+
+            Flag if any of these are missing when they should be present:
+
+            - **Version changes** (image tags, chart versions): a row should be added to `docs/reference/version-matrix.md`.
+            - **New operational process or gotcha**: should appear in `docs/guides/` or `docs/reference/technical-gotchas.md`.
+            - **Session-level change**: `docs/CHANGELOG.md` should have an entry.
+            - **New app deployment**: should follow the app deployment pattern (namespace, deployment/HelmRelease, service, ingress, tailscale-ingress, external-secret).
+
+            ---
+
+            ## Output format
+
+            Post your review as a `gh pr review` comment with this structure:
+
+            ```
+            ## Claude Code Review
+
+            ### Findings
+            (ordered High → Medium → Low; omit section if none)
+            - **[High/Medium/Low]** `path/to/file:line` — description of issue and suggested fix
+
+            ### Suggestions
+            (non-blocking improvements)
+
+            ### Documentation gaps
+            (docs that should be added or updated)
+
+            ### CI status
+            (summarise `gh pr checks ${{ github.event.pull_request.number }}` results)
+
+            ### Decision
+            APPROVE / REQUEST CHANGES / COMMENT
+            (reason in one sentence)
+            ```
+
+            Rules:
+            - If no findings: approve with `gh pr review ${{ github.event.pull_request.number }} --approve --body "..."`
+            - If any High/Medium finding: request changes with `gh pr review ${{ github.event.pull_request.number }} --request-changes --body "..."`
+            - If GitHub blocks request-changes (own PR): fall back to `--comment` and note why.
+            - Only flag issues actually present in the diff. Do not invent findings.

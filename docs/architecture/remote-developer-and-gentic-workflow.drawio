@@ -1,0 +1,40 @@
+<mxfile host="drawio.oryx-tegu.ts.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" version="29.3.6">
+  <diagram name="Page-1" id="lcKCS4MKeK-yegmsegv2">
+    <mxGraphModel dx="1360" dy="793" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;" value="Homelab" vertex="1">
+          <mxGeometry height="460" width="640" x="280" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-2" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" value="Database" vertex="1">
+          <mxGeometry height="80" width="60" x="670" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-3" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" value="Developer (Me)" vertex="1">
+          <mxGeometry height="60" width="30" x="130" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-6" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;" value="Coder Dev Environments" vertex="1">
+          <mxGeometry height="220" width="290" x="330" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-7" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;" value="DevContainer (Docker Compose)" vertex="1">
+          <mxGeometry height="170" width="260" x="345" y="340" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-5" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;" value="Code Server (Web VSCode)" vertex="1">
+          <mxGeometry height="100" width="170" x="380" y="400" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-8" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;" value="Gitlab" vertex="1">
+          <mxGeometry height="100" width="170" x="670" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-9" parent="1" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;" value="TeamCity" vertex="1">
+          <mxGeometry height="100" width="170" x="670" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-10" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" value="Nexus" vertex="1">
+          <mxGeometry height="80" width="60" x="770" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="KmjhG0ZdMhZuyujivv3T-11" edge="1" parent="1" source="KmjhG0ZdMhZuyujivv3T-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="KmjhG0ZdMhZuyujivv3T-5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

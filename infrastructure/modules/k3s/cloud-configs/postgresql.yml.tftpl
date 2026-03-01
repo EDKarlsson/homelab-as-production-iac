@@ -1,0 +1,342 @@
+#cloud-config
+# PostgreSQL Database Configuration Template
+# Norse-themed Asgard K3s Cluster - Database Server
+
+hostname: ${hostname}
+fqdn: ${hostname}.homelab.local
+
+users:
+  - name: ${username}
+    groups: [adm, sudo]
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# Package updates and installations
+package_update: true
+package_upgrade: true
+
+packages:
+  - postgresql
+  - postgresql-contrib
+  - postgresql-client
+  - curl
+  - wget
+  - jq
+  - htop
+  - net-tools
+  - unzip
+  - git
+  - logrotate
+  - qemu-guest-agent
+
+runcmd:
+  - |
+    parted /dev/sdb --script mklabel gpt
+    parted -a optimal /dev/sdb --script mkpart primary ext4 0% 100%
+    mkfs.ext4 /dev/sdb1
+    mkdir -p /mnt/data
+    DB_UUID=$(blkid -s UUID -o value /dev/sdb1)
+    echo "UUID=$DB_UUID /mnt/data ext4 defaults 0 2" >> /etc/fstab
+    mount -a
+
+  - |
+    # Stop PostgreSQL service before moving data directory
+    systemctl stop postgresql
+    mv /var/lib/postgresql /mnt/data/postgresql
+
+  - |
+    chown -R postgres:postgres /mnt/data
+    chmod 700 /mnt/data/postgresql
+    psql_version=$(psql -V | awk '{print $3}' | cut -d. -f1)
+    sed -i "s|data_directory = .*|data_directory = '/mnt/data/postgresql/$psql_version/main'|" /etc/postgresql/$psql_version/main/postgresql.conf
+
+    
+  # Configure PostgreSQL
+  - systemctl start postgresql
+  - systemctl enable postgresql
+  
+  # Set postgres user password
+  - |
+    sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${postgres_password}';"
+  
+  # Create K3s database and user
+  - |
+    sudo -u postgres createdb k3s
+    sudo -u postgres psql -c "CREATE USER k3s WITH ENCRYPTED PASSWORD '${k3s_db_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE k3s TO k3s;"
+    sudo -u postgres psql -d k3s -c "GRANT ALL ON SCHEMA public TO k3s;"
+    sudo -u postgres psql -d k3s -c "GRANT CREATE ON SCHEMA public TO k3s;"
+
+  # Create Terraform remote state database and user
+  - |
+    sudo -u postgres createdb terraform_state
+    sudo -u postgres psql -c "CREATE USER terraform WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE terraform_state TO terraform;"
+    sudo -u postgres psql -d terraform_state -c "GRANT ALL ON SCHEMA public TO terraform;"
+    sudo -u postgres psql -d terraform_state -c "GRANT CREATE ON SCHEMA public TO terraform;"
+
+  # Create Keycloak database and user
+  - |
+    sudo -u postgres createdb keycloak
+    sudo -u postgres psql -c "CREATE USER keycloak WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;"
+    sudo -u postgres psql -d keycloak -c "GRANT ALL ON SCHEMA public TO keycloak;"
+    sudo -u postgres psql -d keycloak -c "GRANT CREATE ON SCHEMA public TO keycloak;"
+
+  # Configure PostgreSQL for remote connections
+  - |
+    PG_VERSION=$(sudo -u postgres psql -t -c "SELECT version();" | grep -oP 'PostgreSQL \K[0-9]+')
+    PG_CONFIG_DIR="/etc/postgresql/$PG_VERSION/main"
+    
+    # Update postgresql.conf
+    sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONFIG_DIR/postgresql.conf"
+    sed -i "s/#port = 5432/port = 5432/" "$PG_CONFIG_DIR/postgresql.conf"
+    
+    # Configure memory and performance settings
+    cat >> "$PG_CONFIG_DIR/postgresql.conf" << EOF
+    
+    # Performance tuning for K3s workload
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    work_mem = 4MB
+    maintenance_work_mem = 64MB
+    
+    # Connection settings
+    max_connections = 100
+    
+    # Write-ahead logging
+    wal_level = replica
+    max_wal_size = 1GB
+    min_wal_size = 80MB
+    
+    # Checkpoints
+    checkpoint_completion_target = 0.7
+    checkpoint_timeout = 5min
+    
+    # Logging
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = 'log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_file_mode = 0600
+    log_rotation_age = 1d
+    log_rotation_size = 10MB
+    log_min_duration_statement = 1000
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    EOF
+  
+  # Configure client authentication
+  - |
+    PG_VERSION=$(sudo -u postgres psql -t -c "SELECT version();" | grep -oP 'PostgreSQL \K[0-9]+')
+    PG_HBA_FILE="/etc/postgresql/$PG_VERSION/main/pg_hba.conf"
+    
+    # Backup original pg_hba.conf
+    cp "$PG_HBA_FILE" "$PG_HBA_FILE.backup"
+    
+    # Configure authentication for K3s nodes (VLAN02-Homelab network)
+    cat > "$PG_HBA_FILE" << EOF
+    # PostgreSQL Client Authentication Configuration File
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+    
+    # Local connections
+    local   all             postgres                                peer
+    local   all             all                                     peer
+    
+    # IPv4 local connections
+    host    all             postgres        127.0.0.1/32           md5
+    host    all             all             127.0.0.1/32           md5
+    
+    # K3s cluster connections (VLAN02-Homelab: 192.168.2.0/24)
+    host    k3s             k3s             192.168.2.0/24          md5
+    host    terraform_state terraform       192.168.2.0/24          md5
+    host    keycloak        keycloak        192.168.2.0/24          md5
+    host    all             postgres        192.168.2.0/24          md5
+    
+    # IPv6 local connections
+    host    all             all             ::1/128                 md5
+    EOF
+  
+  # Create database backup script
+  - |
+    cat > /usr/local/bin/backup-k3s-db.sh << 'EOF'
+    #!/bin/bash
+    # K3s Database Backup Script
+    
+    BACKUP_DIR="/var/backups/postgresql"
+    BACKUP_FILE="k3s-db-backup-$(date +%Y%m%d_%H%M%S).sql"
+    RETENTION_DAYS=7
+    
+    # Create backup directory
+    mkdir -p "$BACKUP_DIR"
+    
+    # Perform backup
+    sudo -u postgres pg_dump k3s > "$BACKUP_DIR/$BACKUP_FILE"
+    
+    # Compress backup
+    gzip "$BACKUP_DIR/$BACKUP_FILE"
+    
+    # Remove old backups
+    find "$BACKUP_DIR" -name "k3s-db-backup-*.sql.gz" -mtime +$RETENTION_DAYS -delete
+    
+    echo "Backup completed: $BACKUP_FILE.gz"
+    EOF
+    
+    chmod +x /usr/local/bin/backup-k3s-db.sh
+  
+  # Create database restore script
+  - |
+    cat > /usr/local/bin/restore-k3s-db.sh << 'EOF'
+    #!/bin/bash
+    # K3s Database Restore Script
+    
+    if [ $# -ne 1 ]; then
+        echo "Usage: $0 <backup_file.sql.gz>"
+        exit 1
+    fi
+    
+    BACKUP_FILE="$1"
+    
+    if [ ! -f "$BACKUP_FILE" ]; then
+        echo "Backup file not found: $BACKUP_FILE"
+        exit 1
+    fi
+    
+    echo "WARNING: This will drop and recreate the k3s database!"
+    echo "Press Ctrl+C to cancel, or Enter to continue..."
+    read
+    
+    # Drop and recreate database
+    sudo -u postgres dropdb k3s
+    sudo -u postgres createdb k3s
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE k3s TO k3s;"
+    sudo -u postgres psql -d k3s -c "GRANT ALL ON SCHEMA public TO k3s;"
+    sudo -u postgres psql -d k3s -c "GRANT CREATE ON SCHEMA public TO k3s;"
+    
+    # Restore from backup
+    gunzip -c "$BACKUP_FILE" | sudo -u postgres psql k3s
+    
+    echo "Database restored from: $BACKUP_FILE"
+    EOF
+    
+    chmod +x /usr/local/bin/restore-k3s-db.sh
+  
+  # Set up monitoring user
+  - |
+    sudo -u postgres psql -c "CREATE USER monitoring WITH PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT CONNECT ON DATABASE k3s TO monitoring;"
+    sudo -u postgres psql -c "GRANT pg_monitor TO monitoring;"
+  
+  # Restart PostgreSQL to apply configuration
+  - systemctl restart postgresql
+  
+  # Verify PostgreSQL is running and accessible
+  - |
+    sleep 5
+    sudo -u postgres psql -d k3s -c "SELECT version();"
+    echo "PostgreSQL configuration completed!"
+
+write_files:
+  - path: /etc/cron.d/k3s-db-backup
+    content: |
+      # K3s Database Backup Cron Job
+      # Backup every 6 hours
+      0 */6 * * * root /usr/local/bin/backup-k3s-db.sh >/var/log/k3s-backup.log 2>&1
+    permissions: '0644'
+
+  - path: /etc/logrotate.d/k3s-backup
+    content: |
+      /var/log/k3s-backup.log {
+        daily
+        missingok
+        rotate 30
+        compress
+        delaycompress
+        notifempty
+        copytruncate
+      }
+    permissions: '0644'
+
+  - path: /etc/systemd/system/postgresql-k3s-monitor.service
+    content: |
+      [Unit]
+      Description=PostgreSQL K3s Database Monitor
+      After=postgresql.service
+      Requires=postgresql.service
+      
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash -c 'sudo -u postgres psql -d k3s -c "SELECT 1;" >/dev/null'
+      
+      [Install]
+      WantedBy=multi-user.target
+    permissions: '0644'
+
+  - path: /etc/systemd/system/postgresql-k3s-monitor.timer
+    content: |
+      [Unit]
+      Description=Run PostgreSQL K3s Monitor every 5 minutes
+      Requires=postgresql-k3s-monitor.service
+      
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+      
+      [Install]
+      WantedBy=timers.target
+    permissions: '0644'
+
+  - path: /home/${username}/.bashrc.d/postgresql-aliases
+    defer: true
+    content: |
+      # PostgreSQL aliases
+      alias psql-k3s='sudo -u postgres psql -d k3s'
+      alias psql-admin='sudo -u postgres psql'
+      alias pg-backup='sudo /usr/local/bin/backup-k3s-db.sh'
+      alias pg-restore='sudo /usr/local/bin/restore-k3s-db.sh'
+      alias pg-status='sudo systemctl status postgresql'
+      alias pg-logs='sudo journalctl -u postgresql -f'
+      
+      # Database monitoring aliases  
+      alias pg-connections='sudo -u postgres psql -c "SELECT datname, usename, client_addr, state FROM pg_stat_activity WHERE state = '\''active'\'';"'
+      alias pg-size='sudo -u postgres psql -d k3s -c "SELECT pg_size_pretty(pg_database_size('\''k3s'\''));"'
+    permissions: '0644'
+    owner: ${username}:${username}
+
+final_message: |
+  PostgreSQL Database Server ${hostname} installation completed!
+  
+  Database Information:
+  - Server: ${hostname}.homelab.local
+  - Databases: k3s, terraform_state
+  - Users: k3s, terraform
+  - Port: 5432
+  - Accessible from: 192.168.2.0/24 (VLAN02-Homelab)
+
+  Connection String for K3s:
+  postgres://k3s:${k3s_db_password}@${hostname}.homelab.local:5432/k3s
+
+  Connection String for Terraform State:
+  postgres://terraform:***@${hostname}.homelab.local:5432/terraform_state
+  
+  Access:
+  - SSH: ssh ${username}@$(hostname -I | awk '{print $1}')
+  - Database: psql -h ${hostname}.homelab.local -U k3s -d k3s
+  
+  Management Commands:
+  - Backup: sudo /usr/local/bin/backup-k3s-db.sh
+  - Restore: sudo /usr/local/bin/restore-k3s-db.sh <backup_file>
+  - Status: systemctl status postgresql
+  - Logs: journalctl -u postgresql -f
+  
+  Monitoring:
+  - Database size: sudo -u postgres psql -d k3s -c "SELECT pg_size_pretty(pg_database_size('k3s'));"
+  - Connections: sudo -u postgres psql -c "SELECT count(*) FROM pg_stat_activity WHERE datname = 'k3s';"
+  
+  Next Steps:
+  - Verify K3s can connect to database
+  - Configure monitoring and alerting
+  - Set up database replication if needed
+  - Review backup schedule and retention

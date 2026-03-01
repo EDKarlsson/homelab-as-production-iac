@@ -1,0 +1,89 @@
+---
+# Configure Nexus as the apt mirror for K3s VMs.
+#
+# What this does:
+#   1. Writes /etc/apt/sources.list.d/nexus-ubuntu.sources (deb822 format)
+#      pointing to Nexus proxy repos for all Ubuntu suites
+#   2. Renames /etc/apt/sources.list.d/ubuntu.sources → ubuntu.sources.disabled
+#      so the default upstream sources are bypassed (reversible, skipped if already done)
+#   3. Runs apt-get update to verify the new sources work (fails play if unreachable)
+#
+# Prerequisites:
+#   - Nexus LoadBalancer service deployed (kubernetes/apps/nexus/service-lb.yaml)
+#   - Nexus accessible at nexus_apt_url from all target hosts
+#   - apt-ubuntu and apt-ubuntu-security proxy repos configured in Nexus
+#
+# nexus_apt_url defaults from group_vars/k3s_cluster.yml — override with -e if needed.
+#
+# Usage:
+#   ansible-playbook -i ansible/inventory/k3s.yml \
+#     ansible/playbooks/nexus-apt-mirror.yml \
+#     --forks=1
+#
+# To revert:
+#   ansible -i ansible/inventory/k3s.yml k3s_cluster -b -m command \
+#     -a "mv /etc/apt/sources.list.d/ubuntu.sources.disabled /etc/apt/sources.list.d/ubuntu.sources" \
+#     --forks=1
+#   ansible -i ansible/inventory/k3s.yml k3s_cluster -b -m file \
+#     -a "path=/etc/apt/sources.list.d/nexus-ubuntu.sources state=absent" \
+#     --forks=1
+
+- name: Configure Nexus APT mirror on K3s cluster nodes
+  hosts: k3s_cluster
+  become: true
+  # nexus_apt_url is defined in group_vars/k3s_cluster.yml — single source of truth for the IP.
+  # ubuntu_codename uses the Ansible fact so the playbook adapts across Ubuntu versions.
+
+  tasks:
+    - name: Write Nexus apt sources (deb822 format)
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/nexus-ubuntu.sources
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible — nexus-apt-mirror.yml
+          # Proxies archive.ubuntu.com and security.ubuntu.com via Nexus
+          Types: deb
+          URIs: {{ nexus_apt_url }}/repository/apt-ubuntu/
+          Suites: {{ ansible_distribution_release }} {{ ansible_distribution_release }}-updates {{ ansible_distribution_release }}-backports
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: {{ nexus_apt_url }}/repository/apt-ubuntu-security/
+          Suites: {{ ansible_distribution_release }}-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+    - name: Check if default ubuntu.sources exists
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/ubuntu.sources
+      register: ubuntu_sources_stat
+
+    - name: Disable default ubuntu.sources (rename, not delete — reversible)
+      ansible.builtin.command:
+        cmd: mv /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.disabled
+        creates: /etc/apt/sources.list.d/ubuntu.sources.disabled
+      when: ubuntu_sources_stat.stat.exists
+
+    - name: Run apt update to verify Nexus sources
+      ansible.builtin.apt:
+        update_cache: true
+
+- name: Configure Nexus APT mirror on Proxmox hosts
+  hosts: pve_hosts  # Note: pve_hosts group not in inventory yet — add PVE nodes to run this play
+  become: true
+
+  tasks:
+    # PVE hosts run Debian bookworm — not Ubuntu. Nexus only has apt-ubuntu repos.
+    # To enable this play:
+    #   1. Add apt-debian, apt-debian-security, apt-proxmox proxy repos to Nexus
+    #   2. Add PVE node IPs to ansible/inventory/ under a [pve_hosts] group
+    #   3. Implement tasks here (similar pattern: write .sources file, disable original)
+    - name: Note — Debian/Proxmox apt proxy not yet configured
+      ansible.builtin.debug:
+        msg: >
+          PVE hosts run Debian bookworm. Add apt-debian and apt-proxmox
+          proxy repos to Nexus first, then implement tasks here.
+          See docs/guides/nexus-apt-proxy.md for details.

@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: calibre-web-tailscale
+  namespace: calibre-web
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: calibre-web
+      port:
+        number: 8083
+  tls:
+    - hosts:
+        - calibre-web

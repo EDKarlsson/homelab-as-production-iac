@@ -1,0 +1,2 @@
+infrastructure/modules/op-connect/templates/docker-compose.yml|1password/connect-api:latest
+infrastructure/modules/op-connect/templates/docker-compose.yml|1password/connect-sync:latest

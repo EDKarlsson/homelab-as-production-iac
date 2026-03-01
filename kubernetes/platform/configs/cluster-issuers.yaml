@@ -1,0 +1,40 @@
+---
+# Self-signed issuer — bootstraps the internal CA certificate
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+# Internal CA certificate — signed by the self-signed issuer above
+# Export the CA from the Secret to trust on LAN devices (eliminates browser warnings):
+#   kubectl get secret homelab-ca -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d > homelab-ca.crt
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: homelab-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: Homelab CA
+  secretName: homelab-ca
+  duration: 87600h # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# CA issuer — signs all TLS certificates for Ingress resources
+# Use this issuer in Ingress annotations:
+#   cert-manager.io/cluster-issuer: homelab-ca-issuer
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: homelab-ca-issuer
+spec:
+  ca:
+    secretName: homelab-ca

@@ -1,0 +1,169 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dependency-track
+  namespace: dependency-track
+  labels:
+    app.kubernetes.io/name: dependency-track
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dependency-track
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dependency-track
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: homelab-agent-node-05
+      # Import homelab CA into the JVM truststore so OIDC calls to keycloak.homelab.ts.net
+      # succeed. CoreDNS rewrites that hostname to the nip.io ingress (homelab CA cert);
+      # without this the JVM rejects the cert with PKIX path building failed.
+      initContainers:
+        - name: trust-homelab-ca
+          image: dependencytrack/bundled:4.13.6
+          command:
+            - sh
+            - -c
+            - |
+              cp /opt/java/openjdk/lib/security/cacerts /truststore/cacerts
+              keytool -import -trustcacerts -noprompt \
+                -alias homelab-ca \
+                -file /etc/ssl/homelab/ca.crt \
+                -keystore /truststore/cacerts \
+                -storepass changeit
+              echo "Homelab CA imported into JVM truststore"
+          volumeMounts:
+            - name: truststore
+              mountPath: /truststore
+            - name: homelab-ca
+              mountPath: /etc/ssl/homelab
+              readOnly: true
+      containers:
+        - name: dependency-track
+          image: dependencytrack/bundled:4.13.6
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # External PostgreSQL (HA VIP)
+            - name: ALPINE_DATABASE_MODE
+              value: external
+            - name: ALPINE_DATABASE_DRIVER
+              value: org.postgresql.Driver
+            - name: ALPINE_DATABASE_URL
+              value: "jdbc:postgresql://10.0.0.44:5432/dependencytrack"
+            - name: ALPINE_DATABASE_USERNAME
+              value: dependencytrack
+            - name: ALPINE_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dependency-track-secrets
+                  key: db-password
+            # Data directory
+            - name: ALPINE_DATA_DIRECTORY
+              value: /data
+            # JVM heap — must be lower than the container memory limit
+            - name: ALPINE_MEMORY_MAXIMUM
+              value: 6g
+            # OIDC — Keycloak single sign-on
+            # Public client (no secret) — DT frontend initiates PKCE flow directly with Keycloak.
+            # ALPINE_OIDC_USER_PROVISIONING auto-creates DT accounts on first login.
+            # ALPINE_* vars configure the backend (token validation).
+            # The frontend reads /static/config.json which Jetty extracts from the bundled JAR
+            # at startup. The bundled image has no entrypoint.sh to inject env vars into that
+            # file, so the postStart lifecycle hook patches it in-place after extraction.
+            - name: ALPINE_OIDC_ENABLED
+              value: "true"
+            - name: ALPINE_OIDC_CLIENT_ID
+              value: "dependency-track"
+            - name: ALPINE_OIDC_ISSUER
+              value: "https://keycloak.homelab.ts.net/auth/realms/homelab"
+            - name: ALPINE_OIDC_USERNAME_CLAIM
+              value: "preferred_username"
+            - name: ALPINE_OIDC_USER_PROVISIONING
+              value: "true"
+            # Future: enable auto-assignment of DT team permissions on OIDC login.
+            # Requires a Keycloak group (e.g. "dependency-track-admins"), a groups
+            # mapper on the dependency-track client, and a matching OIDC Mapping on
+            # the DT team (Administration → Access Management → Teams → OIDC Mappings).
+            #   - name: ALPINE_OIDC_TEAMS_PROVISIONING
+            #     value: "true"
+            #   - name: ALPINE_OIDC_TEAMS_CLAIM
+            #     value: "groups"
+            # Point the JVM at the custom truststore built by the init container.
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Djavax.net.ssl.trustStore=/truststore/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 2Gi
+            limits:
+              cpu: 4000m
+              memory: 8Gi   # 6g heap + ~2Gi JVM overhead headroom
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: truststore
+              mountPath: /truststore
+              readOnly: true
+          # Dependency-Track runs DB migrations on first boot — allow up to 10 minutes
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 40   # 40 × 15s = 10 minutes
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          # Patch /static/config.json after Jetty extracts the bundled JAR.
+          # The bundled image bakes config.json with empty OIDC values at build time;
+          # there is no entrypoint.sh to inject them at runtime (unlike the standalone
+          # frontend image). The hook waits up to 120s for Jetty to extract the file,
+          # then sed-patches the empty OIDC_CLIENT_ID and OIDC_ISSUER in place.
+          # safe to exit 0 even on timeout — OIDC button just won't appear.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    i=0
+                    while [ $i -lt 60 ]; do
+                      f=$(find /tmp -maxdepth 5 -path '*/webapp/static/config.json' 2>/dev/null | head -1)
+                      if [ -n "$f" ]; then
+                        sed -i 's|"OIDC_CLIENT_ID": ""|"OIDC_CLIENT_ID": "dependency-track"|' "$f"
+                        sed -i 's|"OIDC_ISSUER": ""|"OIDC_ISSUER": "https://keycloak.homelab.ts.net/auth/realms/homelab"|' "$f"
+                        exit 0
+                      fi
+                      sleep 2
+                      i=$((i + 1))
+                    done
+                    exit 0
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dependency-track-data
+        - name: truststore
+          emptyDir: {}
+        - name: homelab-ca
+          configMap:
+            name: homelab-ca-cert

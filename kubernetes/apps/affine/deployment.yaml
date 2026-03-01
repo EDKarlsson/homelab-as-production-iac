@@ -1,0 +1,96 @@
+---
+# AFFiNE — collaborative knowledge base / whiteboard.
+# Self-hosted all-in-one mode (single image, port 3010).
+# Migration runs as an init container (idempotent — safe on every restart).
+#
+# Image: ghcr.io/toeverything/affine
+# Health: GET /info → 200
+# Blob storage: fs provider, PVC at /root/.affine/storage
+# DB: external PostgreSQL HA VIP at 10.0.0.44 (pgvector required)
+# Redis: affine-redis.affine.svc.cluster.local:6379
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: affine
+  namespace: affine
+  labels:
+    app.kubernetes.io/name: affine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: affine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: affine
+    spec:
+      initContainers:
+        - name: affine-migration
+          image: ghcr.io/toeverything/affine:0.26.2
+          command: ["sh", "-c", "set -e; node ./scripts/self-host-predeploy.js"]
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: affine-secrets
+                  key: db-password
+            - name: DATABASE_URL
+              value: "postgresql://affine:$(DATABASE_PASSWORD)@10.0.0.44:5432/affine"
+            - name: REDIS_SERVER_HOST
+              value: "affine-redis.affine.svc.cluster.local"
+      containers:
+        - name: affine
+          image: ghcr.io/toeverything/affine:0.26.2
+          ports:
+            - containerPort: 3010
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: affine-secrets
+                  key: db-password
+            - name: DATABASE_URL
+              value: "postgresql://affine:$(DATABASE_PASSWORD)@10.0.0.44:5432/affine"
+            - name: REDIS_SERVER_HOST
+              value: "affine-redis.affine.svc.cluster.local"
+            - name: AFFINE_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: affine-secrets
+                  key: private-key
+            - name: NODE_ENV
+              value: "production"
+            - name: AFFINE_INDEXER_ENABLED
+              value: "false"
+            - name: AFFINE_SERVER_HOST
+              value: "affine.homelab.ts.net"
+            - name: AFFINE_SERVER_HTTPS
+              value: "true"
+          volumeMounts:
+            - name: storage
+              mountPath: /root/.affine/storage
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /info
+              port: 3010
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /info
+              port: 3010
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: affine-storage

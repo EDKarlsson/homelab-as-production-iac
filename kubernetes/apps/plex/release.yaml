@@ -1,0 +1,24 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: plex
+  namespace: media
+spec:
+  releaseName: plex
+  chart:
+    spec:
+      chart: plex-media-server
+      version: "1.x"
+      sourceRef:
+        kind: HelmRepository
+        name: plex
+        namespace: media
+      interval: 12h
+  interval: 50m
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    force: true
+    remediation:
+      retries: 3

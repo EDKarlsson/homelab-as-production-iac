@@ -1,0 +1,56 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: nexus
+  namespace: nexus
+spec:
+  interval: 50m
+  install:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: nexus-repository-manager
+      version: "64.x"
+      sourceRef:
+        kind: HelmRepository
+        name: sonatype
+        namespace: nexus
+      interval: 12h
+  values:
+    image:
+      tag: "3.89.1"
+    nexus:
+      env:
+        - name: INSTALL4J_ADD_VM_PARAMS
+          value: "-Xms1200M -Xmx1200M -XX:MaxDirectMemorySize=2G -Djava.util.prefs.userRoot=/nexus-data/javaprefs"
+        - name: NEXUS_SECURITY_RANDOMPASSWORD
+          value: "true"
+      resources:
+        requests:
+          cpu: 500m
+          memory: 2Gi
+        limits:
+          cpu: 2000m
+          memory: 4Gi
+
+    persistence:
+      enabled: true
+      storageClass: nfs-kubernetes
+      storageSize: 50Gi
+
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      annotations:
+        cert-manager.io/cluster-issuer: homelab-ca-issuer
+        nginx.ingress.kubernetes.io/proxy-body-size: "0"
+        nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.oauth2-proxy.svc.cluster.local/oauth2/auth"
+        nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.10.0.0.201.nip.io/oauth2/start?rd=$scheme://$host$request_uri"
+        nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Access-Token"
+      hostPath: /
+      hostRepo: nexus.10.0.0.201.nip.io
+      tls:
+        - secretName: nexus-tls
+          hosts:
+            - nexus.10.0.0.201.nip.io

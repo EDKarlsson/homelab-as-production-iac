@@ -1,0 +1,316 @@
+name: Maintenance Checks
+
+# Runs weekly checks and creates/updates GitHub issues for:
+#   - TLS certificates expiring within 30 days
+#   - K3s version lag (2+ minor versions behind latest stable)
+#   - Velero and pg-backup health (last successful backup < 26h ago)
+# Posts a Slack digest of all open maintenance issues after each run.
+#
+# Required secrets:
+#   SLACK_HOMELAB_WEBHOOK   - Slack incoming webhook URL (set from 1Password alertmanager-slack)
+#   TS_AUTH_KEY             - Tailscale reusable ephemeral auth key
+#                             generate: tailscale.com/admin/settings/keys → Generate auth key
+#                             options: Reusable ✅  Ephemeral ✅  Pre-approved ✅  Tags: (none required)
+#   KUBECONFIG_ASGARD_B64  - base64-encoded ~/.kube/config-homelab
+#                             generate: base64 -w0 ~/.kube/config-homelab | gh secret set KUBECONFIG_ASGARD_B64 --repo ${{ github.repository }} --body -
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # Every Monday 08:00 UTC
+  workflow_dispatch:       # Allow manual trigger for testing
+
+permissions:
+  contents: read
+  issues: write  # Required to create and comment on issues
+
+concurrency:
+  group: maintenance-checks
+  cancel-in-progress: false  # Never cancel a running check mid-way
+
+jobs:
+  cert-expiry:
+    name: Certificate Expiry Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          ephemeral: true
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_ASGARD_B64 }}" | base64 -d > ~/.kube/config-homelab
+          chmod 600 ~/.kube/config-homelab
+
+      - name: Check certificates expiring within 30 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KUBECONFIG: /home/runner/.kube/config-homelab
+        run: |
+          set -euo pipefail
+          EXPIRING=""
+
+          while IFS=" " read -r NAME NS; do
+            NOT_AFTER=$(kubectl get certificate "$NAME" -n "$NS" \
+              -o jsonpath='{.status.notAfter}' 2>/dev/null || true)
+            [[ -z "$NOT_AFTER" ]] && continue
+            EXPIRY_EPOCH=$(date -d "$NOT_AFTER" +%s)
+            NOW_EPOCH=$(date +%s)
+            DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+            if [[ $DAYS_LEFT -lt 30 ]]; then
+              # Avoid leading newline on first entry
+              if [[ -z "$EXPIRING" ]]; then
+                EXPIRING="- \`${NS}/${NAME}\`: expires in ${DAYS_LEFT} days (${NOT_AFTER})"
+              else
+                EXPIRING="${EXPIRING}"$'\n'"- \`${NS}/${NAME}\`: expires in ${DAYS_LEFT} days (${NOT_AFTER})"
+              fi
+            fi
+          done < <(kubectl get certificate -A -o json 2>/dev/null \
+            | jq -r '.items[] | "\(.metadata.name) \(.metadata.namespace)"')
+
+          if [[ -z "$EXPIRING" ]]; then
+            echo "All certificates valid for 30+ days."
+            exit 0
+          fi
+
+          TITLE="[maintenance] Certificate expiry warning"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" \
+            --label maintenance --state open --search "$TITLE" \
+            --json number,createdAt --jq '.[0] // empty')
+
+          BODY="$(printf "## Certificates Expiring Within 30 Days\n\n%s\n\n### Checklist\n- [ ] Verify cert-manager can renew (check \`CertificateRequest\` status)\n- [ ] Manual renewal if auto-renew is blocked\n- [ ] Update any hardcoded cert references\n\n_Generated: %s_" "$EXPIRING" "$(date -u)")"
+
+          if [[ -n "$EXISTING" ]]; then
+            NUM=$(echo "$EXISTING" | jq -r '.number')
+            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+            echo "Updated issue #${NUM}"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$TITLE" \
+              --label "maintenance,cert-manager" \
+              --body "$BODY"
+          fi
+
+  k3s-version-check:
+    name: K3s Version Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          ephemeral: true
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_ASGARD_B64 }}" | base64 -d > ~/.kube/config-homelab
+          chmod 600 ~/.kube/config-homelab
+
+      - name: Compare running K3s version to latest stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KUBECONFIG: /home/runner/.kube/config-homelab
+        run: |
+          set -euo pipefail
+          RUNNING=$(kubectl version -o json 2>/dev/null | jq -r '.serverVersion.gitVersion')
+          LATEST=$(curl -s https://api.github.com/repos/k3s-io/k3s/releases/latest \
+            -H "Authorization: token $GH_TOKEN" | jq -r '.tag_name')
+
+          echo "Running: $RUNNING | Latest: $LATEST"
+
+          # Extract major.minor using sed for portability (no grep -P required)
+          RUNNING_MAJOR=$(echo "$RUNNING" | sed 's/^v\([0-9]*\)\..*/\1/')
+          RUNNING_MINOR=$(echo "$RUNNING" | sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/')
+          LATEST_MAJOR=$(echo "$LATEST"   | sed 's/^v\([0-9]*\)\..*/\1/')
+          LATEST_MINOR=$(echo "$LATEST"   | sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/')
+
+          # Guard against major version differences (treat as max lag)
+          if [[ "$RUNNING_MAJOR" != "$LATEST_MAJOR" ]]; then
+            LAG=99
+          else
+            LAG=$(( LATEST_MINOR - RUNNING_MINOR ))
+          fi
+
+          if [[ $LAG -lt 2 ]]; then
+            echo "K3s version lag is ${LAG} minor versions — within acceptable range."
+            exit 0
+          fi
+
+          # Dedup: comment on existing open issue rather than silently skipping or creating a duplicate
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" \
+            --label "maintenance,k3s,upgrade" --state open \
+            --search "[maintenance] K3s version lag" \
+            --json number --jq '.[0].number // empty')
+
+          BODY="## K3s Version Upgrade Needed
+
+| | Version |
+|---|---|
+| **Running** | \`${RUNNING}\` |
+| **Latest stable** | \`${LATEST}\` |
+| **Minor version lag** | ${LAG} |
+
+### Checklist
+- [ ] Review [K3s changelog](https://github.com/k3s-io/k3s/releases) for breaking changes
+- [ ] Test upgrade on a single agent node first
+- [ ] Run rolling upgrade: agents → servers (see \`ansible/playbooks/k3s-upgrade.yml\`)
+- [ ] Verify cluster health post-upgrade (\`bash scripts/k8s/k3s-verify.sh --quick\`)
+
+_Generated: $(date -u)_"
+
+          if [[ -n "$EXISTING" ]]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+            echo "Updated existing K3s lag issue #${EXISTING}"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "[maintenance] K3s version lag: ${RUNNING} → ${LATEST}" \
+              --label "maintenance,k3s,upgrade" \
+              --body "$BODY"
+          fi
+
+  backup-health:
+    name: Backup Health Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTH_KEY }}
+          ephemeral: true
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_ASGARD_B64 }}" | base64 -d > ~/.kube/config-homelab
+          chmod 600 ~/.kube/config-homelab
+
+      - name: Verify Velero and pg-backup health
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KUBECONFIG: /home/runner/.kube/config-homelab
+        run: |
+          set -euo pipefail
+          ISSUES=""
+
+          # 26h threshold = daily backup schedule + 2h buffer for slow jobs
+          THRESHOLD_HOURS=26
+
+          # Check Velero last successful backup
+          VELERO_LAST=$(kubectl get backup -n velero \
+            --field-selector=status.phase=Completed \
+            --sort-by='.metadata.creationTimestamp' \
+            -o jsonpath='{.items[-1].status.completionTimestamp}' 2>/dev/null || echo "")
+          if [[ -n "$VELERO_LAST" ]]; then
+            VELERO_EPOCH=$(date -d "$VELERO_LAST" +%s)
+            NOW_EPOCH=$(date +%s)
+            HOURS_AGO=$(( (NOW_EPOCH - VELERO_EPOCH) / 3600 ))
+            if [[ $HOURS_AGO -gt $THRESHOLD_HOURS ]]; then
+              ISSUES="- ⚠️ Velero: last successful backup was ${HOURS_AGO}h ago (expected: <${THRESHOLD_HOURS}h)"
+            else
+              echo "Velero: last successful backup ${HOURS_AGO}h ago — OK"
+            fi
+          else
+            ISSUES="- ❌ Velero: no completed backups found in velero namespace"
+          fi
+
+          # Check pg-backup CronJob existence before querying jobs
+          PG_CRONJOB=$(kubectl get cronjob -n monitoring \
+            -l app.kubernetes.io/name=pg-backup \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [[ -z "$PG_CRONJOB" ]]; then
+            # Avoid leading newline on first entry
+            if [[ -z "$ISSUES" ]]; then
+              ISSUES="- ❌ pg-backup: CronJob not found in monitoring namespace"
+            else
+              ISSUES="${ISSUES}"$'\n'"- ❌ pg-backup: CronJob not found in monitoring namespace"
+            fi
+          else
+            # Use jq to filter by succeeded count (field-selector on status.successful is unreliable for integer fields)
+            PG_LAST=$(kubectl get jobs -n monitoring \
+              -l app.kubernetes.io/name=pg-backup \
+              -o json 2>/dev/null \
+              | jq -r '[.items[] | select(.status.succeeded > 0)] | sort_by(.status.completionTime) | last | .status.completionTime // empty')
+            if [[ -n "$PG_LAST" ]]; then
+              PG_EPOCH=$(date -d "$PG_LAST" +%s)
+              NOW_EPOCH=$(date +%s)
+              HOURS_AGO=$(( (NOW_EPOCH - PG_EPOCH) / 3600 ))
+              if [[ $HOURS_AGO -gt $THRESHOLD_HOURS ]]; then
+                if [[ -z "$ISSUES" ]]; then
+                  ISSUES="- ⚠️ pg-backup: last successful job was ${HOURS_AGO}h ago (expected: <${THRESHOLD_HOURS}h)"
+                else
+                  ISSUES="${ISSUES}"$'\n'"- ⚠️ pg-backup: last successful job was ${HOURS_AGO}h ago (expected: <${THRESHOLD_HOURS}h)"
+                fi
+              else
+                echo "pg-backup: last successful job ${HOURS_AGO}h ago — OK"
+              fi
+            else
+              if [[ -z "$ISSUES" ]]; then
+                ISSUES="- ❌ pg-backup: no successful jobs found in monitoring namespace"
+              else
+                ISSUES="${ISSUES}"$'\n'"- ❌ pg-backup: no successful jobs found in monitoring namespace"
+              fi
+            fi
+          fi
+
+          if [[ -z "$ISSUES" ]]; then
+            echo "All backups healthy."
+            exit 0
+          fi
+
+          TITLE="[maintenance] Backup health issues detected"
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" \
+            --label maintenance --state open --search "$TITLE" \
+            --json number,createdAt --jq '.[0] // empty')
+
+          BODY="$(printf "## Backup Health Issues\n\n%s\n\n### Checklist\n- [ ] Check Velero logs: \`kubectl logs -n velero -l app.kubernetes.io/name=velero\`\n- [ ] Check pg-backup job logs: \`kubectl logs -n monitoring -l app.kubernetes.io/name=pg-backup\`\n- [ ] Trigger manual backup if needed: \`velero backup create manual-%s\`\n- [ ] Verify backup storage (NFS) is accessible\n\n_Generated: %s_" \
+            "$ISSUES" "$(date +%Y%m%d)" "$(date -u)")"
+
+          if [[ -n "$EXISTING" ]]; then
+            NUM=$(echo "$EXISTING" | jq -r '.number')
+            gh issue comment "$NUM" --repo "${{ github.repository }}" --body "$BODY"
+            echo "Updated issue #${NUM}"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$TITLE" \
+              --label "maintenance,backup,velero" \
+              --body "$BODY"
+          fi
+
+  slack-digest:
+    name: Slack Maintenance Digest
+    runs-on: ubuntu-latest
+    needs: [cert-expiry, k3s-version-check, backup-health]
+    if: always()  # Run even if checks created issues (non-zero exit)
+    steps:
+      - name: Post open maintenance issues digest to Slack
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_HOMELAB_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          TOTAL=$(gh issue list --repo "${{ github.repository }}" \
+            --label maintenance --state open \
+            --json number --jq 'length')
+
+          OPEN=$(gh issue list --repo "${{ github.repository }}" \
+            --label maintenance --state open \
+            --json number,title,url \
+            --jq '.[] | "• <\(.url)|\(.title)>"' | head -10)
+
+          if [[ -z "$OPEN" ]]; then
+            MSG=":white_check_mark: *Weekly Maintenance Check* — No open maintenance issues."
+          else
+            MSG=":wrench: *Weekly Maintenance Check* — ${TOTAL} open issue(s):"$'\n'"${OPEN}"
+            if [[ $TOTAL -gt 10 ]]; then
+              MSG="${MSG}"$'\n'"_...and $((TOTAL - 10)) more. <https://github.com/${{ github.repository }}/issues?q=is%3Aopen+label%3Amaintenance|View all>_"
+            fi
+          fi
+
+          PAYLOAD=$(jq -n --arg text "$MSG" '{text: $text}')
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"

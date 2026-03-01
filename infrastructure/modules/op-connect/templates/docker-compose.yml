@@ -1,0 +1,30 @@
+services:
+  connect-api:
+    image: 1password/connect-api:latest
+    container_name: connect-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /opt/op-connect/data:/home/opuser/.op/data
+      - /opt/op-connect/1password-credentials.json:/home/opuser/.op/1password-credentials.json:ro
+    environment:
+      - XDG_DATA_HOME=/home/opuser/.op/data
+      - OP_HTTP_PORT=8080
+      - OP_BUS_PORT=11220
+      - OP_BUS_PEERS=connect-sync:11221
+
+  connect-sync:
+    image: 1password/connect-sync:latest
+    container_name: connect-sync
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - /opt/op-connect/data:/home/opuser/.op/data
+      - /opt/op-connect/1password-credentials.json:/home/opuser/.op/1password-credentials.json:ro
+    environment:
+      - XDG_DATA_HOME=/home/opuser/.op/data
+      - OP_HTTP_PORT=8081
+      - OP_BUS_PORT=11221
+      - OP_BUS_PEERS=connect-api:11220

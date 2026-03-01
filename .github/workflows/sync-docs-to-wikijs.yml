@@ -1,0 +1,62 @@
+# Sync docs/ to the Wiki.js Git storage repo (one-way)
+#
+# Triggers on pushes to main that modify docs/ (excluding archive/).
+# Copies markdown files to homelab-wikijs under a project-prefixed
+# directory (projects/homelab-iac/), adding Wiki.js YAML frontmatter
+# if missing. Uses "sibling page" pattern (prefix.md alongside prefix/)
+# so Wiki.js displays frontmatter titles in navigation instead of raw
+# folder names. Supports multiple projects syncing to the same wiki.
+#
+# Wiki.js URL structure: https://wiki.homelab.ts.net/en/projects/homelab-iac/guides/...
+#
+# Required secret: WIKIJS_DEPLOY_KEY — SSH deploy key with write
+# access to homelab-admin/homelab-wikijs.
+name: Sync docs to Wiki.js
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "!docs/archive/**"
+
+  # Allow manual trigger for initial sync or re-sync
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homelab-iac
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout homelab-wikijs
+        uses: actions/checkout@v4
+        with:
+          repository: homelab-admin/homelab-wikijs
+          ssh-key: ${{ secrets.WIKIJS_DEPLOY_KEY }}
+          path: target
+
+      - name: Sync docs to Wiki.js repo
+        run: |
+          cd source
+          bash scripts/docs-sync/sync.sh ../target projects/homelab-iac
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+
+      - name: Push to Wiki.js repo
+        run: |
+          cd target
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to push"
+            exit 0
+          fi
+          git commit -m "docs: sync from homelab-iac@${COMMIT_SHA:0:7}"
+          git push
+        env:
+          COMMIT_SHA: ${{ github.sha }}

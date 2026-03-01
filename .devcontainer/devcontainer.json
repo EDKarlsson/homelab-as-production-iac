@@ -1,0 +1,82 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/python
+{
+    "name": "Homelab",
+    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+    // "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bullseye",
+    "service": "bastion",
+    "dockerComposeFile": "./docker-compose.yml",
+    "workspaceFolder": "/workspace",
+    "shutdownAction": "stopCompose",
+    "features": {
+        "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+            "version": "latest",
+            "helm": "latest",
+            "minikube": "latest"
+        },
+        "ghcr.io/nils-geistmann/devcontainers-features/zsh:0": {
+            "setLocale": true,
+            "theme": "robbyrussell",
+            "plugins": "git docker",
+            "desiredLocale": "en_US.UTF-8 UTF-8"
+        },
+        "ghcr.io/devcontainers-extra/features/tailscale:1": {},
+        "ghcr.io/devcontainers-extra/features/ansible": {},
+        "ghcr.io/devcontainers/features/node": {}
+    },
+    "mounts": [
+        "source=~/.claude,target=/root/.claude,type=bind,consistency=cached"
+    ],
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "mypy.dmypyExecutable": "dmypy",
+                "files.exclude": {
+                    "**/*.pyc": true,
+                    "**/.config": true,
+                    "**/.local": true,
+                    "**/.ssh": true,
+                    "**/.terraform": true,
+                    "**/.venv": true,
+                    "**/.vscode-server": true,
+                    "**/__pycache__": true,
+                    ".claude": true,
+                    ".clinerules": true,
+                    ".gemini": true
+                }
+            },
+            "extensions": [
+                "4ops.terraform",
+                "Anthropic.claude-code",
+                "DavidAnson.vscode-markdownlint",
+                "GitHub.copilot-chat",
+                "Hamster.task-master-hamster",
+                "claude-ai.claude-vscode",
+                "codezombiech.gitignore",
+                "eriklynd.json-tools",
+                "foxundermoon.shell-format",
+                "hashicorp.hcl",
+                "hashicorp.terraform",
+                "matangover.mypy",
+                "ms-azuretools.vscode-containers",
+                "ms-azuretools.vscode-docker",
+                "ms-kubernetes-tools.vscode-kubernetes-tools",
+                "ms-python.black-formatter",
+                "ms-python.debugpy",
+                "ms-python.flake8",
+                "ms-python.isort",
+                "ms-python.pylint",
+                "ms-python.python",
+                "redhat.ansible",
+                "redhat.vscode-yaml",
+                "saoudrizwan.claude-dev",
+                "tamasfe.even-better-toml",
+                "uniquevision.vscode-plpgsql-lsp",
+                "vscodevim.vim",
+                "yzhang.markdown-all-in-one"
+            ]
+        }
+    },
+    "remoteUser": "odin",
+    "postCreateCommand": "pip install -r requirements.txt"
+}

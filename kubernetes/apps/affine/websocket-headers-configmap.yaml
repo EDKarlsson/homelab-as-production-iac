@@ -1,0 +1,11 @@
+---
+# Headers for WebSocket proxying — injected via proxy-set-headers ingress annotation.
+# Used instead of configuration-snippet (disabled by admission webhook).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: websocket-headers
+  namespace: affine
+data:
+  Upgrade: "$http_upgrade"
+  Connection: "upgrade"

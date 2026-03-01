@@ -1,0 +1,133 @@
+---
+- name: Install tools
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Install preferred shell tools and utilities
+      ansible.builtin.apt:
+        name:
+          - vim
+          - tmux
+          - jq
+          - tree
+          - lshw
+        state: present
+        update_cache: true
+  tags:
+    - tools
+
+# This uses the artis3n.tailscale collection from Ansible Galaxy
+- name: Install tailscale
+  hosts: proxmox
+  roles:
+    - role: artis3n.tailscale.machine
+      vars:
+        tailscale_authkey: "{{ lookup('env', 'TAILSCALE_AUTH_KEY') }}"
+  tags:
+    - tailscale
+
+- name: Set pvenode certs to tailscale
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Create tailscale certs
+      ansible.builtin.command:
+        cmd: tailscale cert "{{ inventory_hostname }}.homelab.ts.net"
+      register: tailscale_cert_result
+      changed_when: "'Wrote private key to' in tailscale_cert_result.stdout"
+
+    - name: Update pvenode certs
+      ansible.builtin.command:
+        cmd: pvenode cert set "{{ inventory_hostname }}.homelab.ts.net.crt"  "{{ inventory_hostname }}.homelab.ts.net.key" --force --restart
+      register: pvenode_cert_result
+      changed_when: "'Restarting pveproxy' in pvenode_cert_result.stdout"
+  tags:
+    - pve-ts-certs
+
+- name: PVE update certs
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Update Proxmox VE cluster certificates
+      ansible.builtin.command:
+        cmd: pvecm updatecerts
+      register: updatecerts_result
+      changed_when: "'merge authorized SSH keys' in updatecerts_result.stdout"
+  tags:
+    - pve-update-certs
+
+- name: Install and configure NUT client
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Install NUT packages
+      ansible.builtin.apt:
+        name:
+          - nut
+          - nut-client
+        state: present
+        update_cache: true
+
+    - name: Enable and start NUT client service
+      ansible.builtin.systemd_service:
+        name: nut-client
+        enabled: true
+        state: started
+
+    - name: Configure NUT client mode to netclient
+      ansible.builtin.lineinfile:
+        path: /etc/nut/nut.conf
+        regexp: "^mode="
+        line: "mode=netclient"
+
+    - name: Add UPS monitor configuration
+      ansible.builtin.lineinfile:
+        path: /etc/nut/hosts.conf
+        line: 'MONITOR ups@leviathan "NAS CyberPower CP1350PFCLCD UPS"'
+        owner: root
+        group: root
+        mode: "0644"
+        create: true
+        state: present
+
+    - name: Copy monitoring configuration file
+      ansible.builtin.copy:
+        src: files/nut/upsmon.conf
+        dest: /etc/nut/upsmon.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart NUT client service to apply changes
+      ansible.builtin.systemd_service:
+        name: nut-client
+        state: restarted
+  tags:
+    - nut
+
+- name: Speedtest install
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Download speedtest CLI
+      ansible.builtin.get_url:
+        url: https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh
+        dest: /tmp/install_speedtest.sh
+        mode: "0755"
+
+    - name: Run speedtest install script
+      ansible.builtin.command:
+        cmd: /tmp/install_speedtest.sh
+      environment:
+        os: "debian"
+        dist: "trixie"
+      register: speedtest_install_result
+      changed_when: "'Speedtest CLI is already installed' not in speedtest_install_result.stdout"
+
+    - name: Install speedtest package
+      ansible.builtin.apt:
+        name: speedtest
+        state: present
+        update_cache: true
+  tags:
+    - speedtest

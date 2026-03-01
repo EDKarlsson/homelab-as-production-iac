@@ -1,0 +1,16 @@
+# Calibre-web config volume
+#
+# Stores app config + internal SQLite database
+# On first launch, set library location to /books in the web UI
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: calibre-web-config
+  namespace: calibre-web
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 2Gi

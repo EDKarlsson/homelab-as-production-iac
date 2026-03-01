@@ -1,0 +1,26 @@
+# Tailscale L4 TCP service for GitLab SSH (git clone/push over port 22).
+#
+# The HTTP ingress (tailscale-ingress.yaml) only handles HTTP/HTTPS — it cannot
+# forward raw TCP. A separate LoadBalancer service with loadBalancerClass: tailscale
+# creates a distinct Tailscale node (gitlab-ssh.homelab.ts.net) that does L4
+# forwarding for SSH connections.
+#
+# GitLab is configured to advertise this hostname in clone URLs via
+# gitlab_rails['gitlab_ssh_host'] in the deployment's OMNIBUS_CONFIG.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab-ssh-tailscale
+  namespace: gitlab
+  annotations:
+    tailscale.com/hostname: gitlab-ssh
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: gitlab

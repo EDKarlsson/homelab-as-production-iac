@@ -1,0 +1,296 @@
+---
+# K3s Rolling Upgrade Playbook
+# Upgrades the K3s cluster one node at a time with zero downtime.
+#
+# Upgrade path (must be sequential per Kubernetes version skew policy):
+#   v1.28.3+k3s1 → v1.29.12+k3s1 → v1.30.10+k3s1 → v1.31.8+k3s1 → v1.32.12+k3s1
+#
+# Usage (run once per hop):
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/k3s-upgrade.yml \
+#     -e k3s_version=v1.29.12+k3s1
+#
+# The k3s_version variable MUST be passed at runtime via -e for each hop.
+# Do NOT rely on the group_vars default during upgrades.
+
+# ── Phase 1: Pre-flight checks ─────────────────────────────────────────
+- name: "Pre-flight: verify cluster health before upgrade"
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Record current K3s version
+      ansible.builtin.command: k3s --version
+      register: current_version
+      changed_when: false
+
+    - name: Display current version
+      ansible.builtin.debug:
+        msg: "Current: {{ current_version.stdout }} → Target: {{ k3s_version }}"
+
+    - name: Verify all nodes are Ready
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl get nodes --no-headers | grep -v ' Ready' | wc -l
+      args:
+        executable: /bin/bash
+      register: not_ready_count
+      changed_when: false
+      failed_when: not_ready_count.stdout | int > 0
+
+    - name: Show current node versions
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      register: node_versions
+      changed_when: false
+
+    - name: Display node status
+      ansible.builtin.debug:
+        msg: "{{ node_versions.stdout_lines }}"
+
+    - name: Check for CrashLoopBackOff pods
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl get pods -A --no-headers | grep -c CrashLoopBackOff || true
+      args:
+        executable: /bin/bash
+      register: crash_pods
+      changed_when: false
+
+    - name: Warn about unhealthy pods
+      ansible.builtin.debug:
+        msg: "WARNING: {{ crash_pods.stdout }} pods in CrashLoopBackOff"
+      when: crash_pods.stdout | int > 0
+
+# ── Phase 2: Backup PostgreSQL ──────────────────────────────────────────
+- name: "Backup: dump K3s PostgreSQL database"
+  hosts: k3s_db
+  become: true
+  tasks:
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: /var/backups/k3s-upgrade
+        state: directory
+        mode: "0700"
+
+    - name: Dump K3s database
+      ansible.builtin.shell: |
+        set -o pipefail
+        sudo -u postgres pg_dump k3s | gzip > /var/backups/k3s-upgrade/k3s-pre-{{ k3s_version }}-$(date +%Y%m%d%H%M%S).sql.gz
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Verify backup was created
+      ansible.builtin.find:
+        paths: /var/backups/k3s-upgrade
+        patterns: "*.sql.gz"
+        age: "-1m"
+      register: backup_info
+      changed_when: false
+
+    - name: Display backup info
+      ansible.builtin.debug:
+        msg: "Backup file: {{ backup_info.files | map(attribute='path') | list }}"
+
+# ── Phase 3: Upgrade servers (one at a time) ────────────────────────────
+- name: "Upgrade: K3s server nodes (serial)"
+  hosts: k3s_servers
+  become: true
+  serial: 1
+  tasks:
+    - name: Check current version on this node
+      ansible.builtin.command: k3s --version
+      register: node_current_version
+      changed_when: false
+
+    - name: Skip if already at target version
+      ansible.builtin.debug:
+        msg: "Node already at target version, skipping"
+      when: k3s_version in node_current_version.stdout
+
+    - name: Drain this server node
+      ansible.builtin.command: >
+        k3s kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout=120s
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      changed_when: true
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Download K3s installer
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: "0755"
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Run K3s installer with target version
+      ansible.builtin.shell: |
+        INSTALL_K3S_VERSION={{ k3s_version }} /tmp/k3s-install.sh server
+      changed_when: true
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Wait for K3s service to be active
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+      register: k3s_service
+      until: k3s_service is not failed
+      retries: 12
+      delay: 10
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Wait for node to report Ready
+      ansible.builtin.command: >
+        k3s kubectl get node {{ inventory_hostname }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Uncordon this server node
+      ansible.builtin.command: >
+        k3s kubectl uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      changed_when: true
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Verify upgraded version
+      ansible.builtin.command: k3s --version
+      register: new_version
+      changed_when: false
+
+    - name: Display upgrade result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ new_version.stdout }}"
+
+    - name: Pause 30s before next server
+      ansible.builtin.pause:
+        seconds: 30
+      when: k3s_version not in node_current_version.stdout
+
+# ── Phase 4: Upgrade agents (one at a time) ─────────────────────────────
+- name: "Upgrade: K3s agent nodes (serial)"
+  hosts: k3s_agents
+  become: true
+  serial: 1
+  tasks:
+    - name: Check current version on this node
+      ansible.builtin.command: k3s --version
+      register: node_current_version
+      changed_when: false
+
+    - name: Skip if already at target version
+      ansible.builtin.debug:
+        msg: "Node already at target version, skipping"
+      when: k3s_version in node_current_version.stdout
+
+    - name: Drain this agent node
+      ansible.builtin.command: >
+        k3s kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --timeout=120s
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      changed_when: true
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Download K3s installer
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: "0755"
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Run K3s installer with target version
+      ansible.builtin.shell: |
+        INSTALL_K3S_VERSION={{ k3s_version }} K3S_URL={{ k3s_server_url }} K3S_TOKEN={{ k3s_cluster_token }} /tmp/k3s-install.sh agent
+      changed_when: true
+      no_log: true
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Wait for K3s agent service to be active
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: started
+      register: k3s_agent_service
+      until: k3s_agent_service is not failed
+      retries: 12
+      delay: 10
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Wait for node to report Ready
+      ansible.builtin.command: >
+        k3s kubectl get node {{ inventory_hostname }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Uncordon this agent node
+      ansible.builtin.command: >
+        k3s kubectl uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      changed_when: true
+      when: k3s_version not in node_current_version.stdout
+
+    - name: Verify upgraded version
+      ansible.builtin.command: k3s --version
+      register: new_version
+      changed_when: false
+
+    - name: Display upgrade result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ new_version.stdout }}"
+
+    - name: Pause 30s before next agent
+      ansible.builtin.pause:
+        seconds: 30
+      when: k3s_version not in node_current_version.stdout
+
+# ── Phase 5: Post-upgrade verification ──────────────────────────────────
+- name: "Verify: post-upgrade cluster health"
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Verify all nodes on target version
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      register: final_nodes
+      changed_when: false
+
+    - name: Display final cluster state
+      ansible.builtin.debug:
+        msg: "{{ final_nodes.stdout_lines }}"
+
+    - name: Verify all nodes are Ready
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl get nodes --no-headers | grep -v ' Ready' | wc -l
+      args:
+        executable: /bin/bash
+      register: not_ready_count
+      changed_when: false
+      failed_when: not_ready_count.stdout | int > 0
+
+    - name: Check system pods are healthy
+      ansible.builtin.command: k3s kubectl get pods -n kube-system
+      register: system_pods
+      changed_when: false
+
+    - name: Display system pods
+      ansible.builtin.debug:
+        msg: "{{ system_pods.stdout_lines }}"
+
+    - name: Show upgrade summary
+      ansible.builtin.debug:
+        msg: >-
+          Upgrade to {{ k3s_version }} complete.
+          All {{ groups['k3s_servers'] | length }} servers and
+          {{ groups['k3s_agents'] | length }} agents upgraded successfully.

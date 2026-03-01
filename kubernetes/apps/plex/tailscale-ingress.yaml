@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: plex-tailscale
+  namespace: media
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: plex-plex-media-server
+      port:
+        number: 32400
+  tls:
+    - hosts:
+        - plex

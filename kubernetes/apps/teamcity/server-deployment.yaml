@@ -1,0 +1,84 @@
+# TeamCity Server — single-replica stateful deployment
+#
+# Database configuration happens via the web setup wizard on first boot.
+# TeamCity does NOT read DB credentials from environment variables —
+# the TEAMCITY_DB_PASSWORD env var is provided as a convenience so you
+# can copy-paste it during the wizard. The wizard writes the connection
+# details to /data/teamcity_server/datadir/config/database.properties.
+#
+# First-boot steps:
+#   1. Access https://teamcity.homelab.ts.net
+#   2. Accept the license agreement
+#   3. Select PostgreSQL, enter: host=10.0.0.44, db=teamcity, user=teamcity
+#   4. Get password: kubectl exec -n teamcity deploy/teamcity-server -- printenv TEAMCITY_DB_PASSWORD
+#   5. Wait for schema initialization (2-5 minutes)
+#   6. Create admin account
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teamcity-server
+  namespace: teamcity
+  labels:
+    app.kubernetes.io/name: teamcity-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: teamcity-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teamcity-server
+    spec:
+      containers:
+        - name: teamcity-server
+          image: jetbrains/teamcity-server:2025.11.2
+          ports:
+            - name: http
+              containerPort: 8111
+              protocol: TCP
+          env:
+            - name: TEAMCITY_SERVER_MEM_OPTS
+              value: "-Xmx4g -XX:ReservedCodeCacheSize=512m"
+            - name: TEAMCITY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: teamcity-secrets
+                  key: db-password
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data/teamcity_server/datadir
+            - name: logs
+              mountPath: /opt/teamcity/logs
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 2Gi
+            limits:
+              cpu: 4000m
+              memory: 8Gi
+          livenessProbe:
+            httpGet:
+              path: /healthCheck/healthy
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthCheck/healthy
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: teamcity-server-data
+        - name: logs
+          emptyDir: {}

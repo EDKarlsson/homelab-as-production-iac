@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: github-actions-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: github-actions-exporter
+    app.kubernetes.io/component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: github-actions-exporter
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 300s
+      scrapeTimeout: 30s

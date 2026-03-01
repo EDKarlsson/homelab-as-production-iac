@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cert-manager.yaml
+  - ingress-nginx.yaml
+  - metallb.yaml
+  - nfs-provisioner.yaml
+  - tailscale-operator.yaml
+  - external-secrets.yaml
+  - portainer.yaml
+  - coredns-tailscale.yaml
+  - homelab-ca-configmap.yaml
+  - keycloak.yaml
+  - oauth2-proxy.yaml
+  - longhorn.yaml
+  - ./snapshot-controller
+  - ./velero

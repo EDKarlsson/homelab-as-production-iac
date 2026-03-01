@@ -1,0 +1,33 @@
+vrrp_script check_connect {
+    script "/usr/bin/curl -sf http://localhost:8080/heartbeat"
+    interval 5
+    weight -20
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_OPCONNECT {
+    state ${state}
+    interface eth0
+    virtual_router_id 72
+    priority ${priority}
+    advert_int 1
+
+    unicast_src_ip ${src_ip}
+    unicast_peer {
+        ${peer_ip}
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass opconnect
+    }
+
+    virtual_ipaddress {
+        ${vip}/24
+    }
+
+    track_script {
+        check_connect
+    }
+}

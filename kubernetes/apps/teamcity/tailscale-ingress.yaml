@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: teamcity-tailscale
+  namespace: teamcity
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: teamcity-server
+      port:
+        number: 8111
+  tls:
+    - hosts:
+        - teamcity

@@ -1,0 +1,69 @@
+# Calibre-web — ebook management and reading
+#
+# Image: linuxserver/calibre-web
+# Docs: https://docs.linuxserver.io/images/docker-calibre-web/
+# Default login: admin / admin123
+# On first launch, set library location to /books
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: calibre-web
+  namespace: calibre-web
+  labels:
+    app.kubernetes.io/name: calibre-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: calibre-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: calibre-web
+    spec:
+      containers:
+        - name: calibre-web
+          image: linuxserver/calibre-web:0.6.26
+          ports:
+            - name: http
+              containerPort: 8083
+              protocol: TCP
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: America/Los_Angeles
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: books
+              mountPath: /books
+              subPath: Calibre Library
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: calibre-web-config
+        - name: books
+          persistentVolumeClaim:
+            claimName: calibre-web-books

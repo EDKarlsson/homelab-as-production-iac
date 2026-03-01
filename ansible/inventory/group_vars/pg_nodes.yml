@@ -1,0 +1,22 @@
+# PostgreSQL HA node variables
+# Used by playbooks/pg-backup.yml for backup automation
+
+pg_databases:
+  - k3s
+  - terraform_state
+  - keycloak
+  - n8n
+  - wikijs
+  - teamcity
+  - coder
+  - windmill
+
+# Backup configuration
+pg_backup_vip: "10.0.0.44"
+pg_backup_local_dir: "/var/backups/postgresql"
+pg_backup_local_retention_days: 7
+pg_backup_nas_mount: "/mnt/nas-backups"
+pg_backup_nas_server: "10.0.0.161"
+pg_backup_nas_path: "/volume1/postgresql-backups"
+pg_backup_nas_retention_days: 30
+pg_backup_cron_schedule: "0 */6 * * *"

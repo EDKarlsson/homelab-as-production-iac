@@ -1,0 +1,6 @@
+# K3s Agent Configuration — managed by Ansible
+# See: https://docs.k3s.io/reference/agent-config
+server: {{ k3s_server_url }}
+token: {{ k3s_cluster_token }}
+node-name: {{ inventory_hostname }}
+protect-kernel-defaults: false

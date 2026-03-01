@@ -1,0 +1,17 @@
+# Headless service required by the StatefulSet governing service.
+# Build agents do not need to be directly reachable from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: teamcity-agent
+  namespace: teamcity
+  labels:
+    app.kubernetes.io/name: teamcity-agent
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: teamcity-agent
+  ports:
+    - name: agent
+      port: 9090
+      targetPort: 9090

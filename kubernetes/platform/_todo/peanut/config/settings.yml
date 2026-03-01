@@ -1,0 +1,21 @@
+NUT_SERVERS:
+  - HOST: leviathan
+    PORT: 3493
+    USERNAME: monuser
+    PASSWORD: secret
+    DISABLED: false
+INFLUX_HOST: ''
+INFLUX_TOKEN: ''
+INFLUX_ORG: ''
+INFLUX_BUCKET: ''
+INFLUX_INTERVAL: 10
+DATE_FORMAT: MM/DD/YYYY
+TIME_FORMAT: 12-hour
+DASHBOARD_SECTIONS:
+  - key: KPIS
+    enabled: true
+  - key: CHARTS
+    enabled: true
+  - key: VARIABLES
+    enabled: true
+DISABLE_VERSION_CHECK: false

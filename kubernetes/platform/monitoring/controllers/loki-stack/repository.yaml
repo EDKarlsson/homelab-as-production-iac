@@ -1,0 +1,7 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: grafana-charts
+spec:
+  interval: 120m0s
+  url: http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/helm-grafana/

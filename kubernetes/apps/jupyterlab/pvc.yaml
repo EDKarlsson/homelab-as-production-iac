@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jupyterlab-workspace
+  namespace: jupyterlab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: media
+resources:
+  - namespace.yaml
+  - repository.yaml
+  - release.yaml
+  - pv-movies.yaml
+  - pv-music.yaml
+  - pv-photos.yaml
+  - tailscale-ingress.yaml

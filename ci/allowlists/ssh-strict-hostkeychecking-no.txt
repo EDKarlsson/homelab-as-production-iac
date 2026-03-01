@@ -1,0 +1,3 @@
+ansible/inventory/k3s.yml|StrictHostKeyChecking=no
+scripts/k8s/k3s-ssh.sh|StrictHostKeyChecking=no
+scripts/pve/comfyui-verify.sh|StrictHostKeyChecking=no

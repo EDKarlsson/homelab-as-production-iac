@@ -1,0 +1,15 @@
+---
+# PVC for AFFiNE blob/upload storage — mounted at /root/.affine/storage.
+# Uses fs provider (local filesystem); no S3 needed at homelab scale.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: affine-storage
+  namespace: affine
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,302 @@
+# PrometheusRule — homelab-specific alert rules
+# Covers: pod health, node health, storage, PostgreSQL, PVE nodes, ExternalSecrets, Velero
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: homelab-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    prometheus: kube-prometheus-stack-prometheus
+    role: alert-rules
+spec:
+  groups:
+    # ── Pod Health ────────────────────────────────────────
+    - name: pod-health
+      rules:
+        - alert: PodCrashLooping
+          expr: rate(kube_pod_container_status_restarts_total[15m]) * 60 * 5 > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ printf \"%.0f\" $value }} times in the last 15 minutes."
+
+        - alert: PodNotReady
+          expr: |
+            min_over_time(kube_pod_status_ready{condition="true"}[10m]) == 0
+            and on(namespace, pod)
+            kube_pod_status_phase{phase="Running"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is not ready"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been in a non-ready state for more than 15 minutes."
+
+        - alert: DeploymentReplicasMismatch
+          expr: |
+            kube_deployment_spec_replicas != kube_deployment_status_ready_replicas
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has replica mismatch"
+            description: "Deployment {{ $labels.deployment }} in {{ $labels.namespace }} has {{ $value }} ready replicas vs desired."
+
+    # ── Node Health ───────────────────────────────────────
+    - name: node-health
+      rules:
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "K8s node {{ $labels.node }} is not ready"
+            description: "Node {{ $labels.node }} has been in a non-ready state for more than 5 minutes."
+
+        - alert: NodeHighCPU
+          expr: (1 - avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.instance }} CPU usage above 90%"
+            description: "Node {{ $labels.instance }} has sustained CPU usage above 90% for 15 minutes."
+
+        - alert: NodeHighMemory
+          expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.instance }} memory usage above 90%"
+            description: "Node {{ $labels.instance }} has {{ $value | humanizePercentage }} memory usage."
+
+    # ── Storage ───────────────────────────────────────────
+    - name: storage
+      rules:
+        - alert: PVCAlmostFull
+          expr: |
+            kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.85
+            and kubelet_volume_stats_capacity_bytes > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full"
+            description: "Persistent volume claim {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} is running low on space."
+
+        - alert: NodeDiskAlmostFull
+          expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) > 0.85
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Node {{ $labels.instance }} disk {{ $labels.mountpoint }} is {{ $value | humanizePercentage }} full"
+            description: "Filesystem at {{ $labels.mountpoint }} on {{ $labels.instance }} is running low."
+
+    # ── Proxmox VE ────────────────────────────────────────
+    - name: proxmox
+      rules:
+        - alert: PVENodeDown
+          expr: pve_up{id=~"node/.*"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Proxmox node {{ $labels.node }} is down"
+            description: "PVE node {{ $labels.node }} has been unreachable for more than 3 minutes."
+
+        - alert: PVEHighCPU
+          expr: pve_cpu_usage_ratio{id=~"node/.*"} > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVE node {{ $labels.node }} CPU above 90%"
+            description: "Proxmox node {{ $labels.node }} sustained CPU usage above 90%."
+
+        - alert: PVEHighMemory
+          expr: pve_memory_usage_bytes{id=~"node/.*"} / pve_memory_size_bytes{id=~"node/.*"} > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVE node {{ $labels.node }} memory above 90%"
+            description: "Proxmox node {{ $labels.node }} memory usage is {{ $value | humanizePercentage }}."
+
+        - alert: PVEStorageAlmostFull
+          expr: pve_storage_usage_bytes / pve_storage_size_bytes > 0.85
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVE storage {{ $labels.id }} on {{ $labels.node }} is {{ $value | humanizePercentage }} full"
+            description: "Proxmox storage pool {{ $labels.id }} is running low on space."
+
+        - alert: PVEVMDown
+          expr: |
+            pve_up{id=~"qemu/.*"} == 0
+            and on(id) pve_guest_info{template="false"}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "VM {{ $labels.name }} on {{ $labels.node }} is stopped"
+            description: "VM {{ $labels.name }} ({{ $labels.id }}) has been down for more than 5 minutes."
+
+    # ── External Secrets ──────────────────────────────────
+    - name: external-secrets
+      rules:
+        - alert: ExternalSecretSyncFailed
+          expr: externalsecret_status_condition{condition="Ready", status="False"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ExternalSecret {{ $labels.namespace }}/{{ $labels.name }} sync failed"
+            description: "ExternalSecret {{ $labels.name }} in {{ $labels.namespace }} has been failing to sync for 10 minutes."
+
+    # ── PostgreSQL Backups ────────────────────────────────
+    - name: postgresql-backups
+      rules:
+        - alert: PGBackupJobFailed
+          expr: |
+            kube_job_status_failed{namespace="monitoring", job_name=~"pg-backup.*"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PostgreSQL backup job failed"
+            description: "Backup job {{ $labels.job_name }} in {{ $labels.namespace }} has failed."
+
+        - alert: PGBackupMissing
+          expr: |
+            time() - max(kube_job_status_completion_time{namespace="monitoring", job_name=~"pg-backup.*"}) > 93600
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful PostgreSQL backup in 26 hours"
+            description: "The last successful pg-backup completed more than 26 hours ago. Nightly backup may have stopped running."
+
+    # ── Velero Backups ────────────────────────────────────
+    - name: velero-backups
+      rules:
+        - alert: VeleroBackupFailed
+          expr: |
+            velero_backup_failure_total > 0
+            unless velero_backup_failure_total offset 10m > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Velero backup failed"
+            description: "A Velero backup has failed. Check velero backup logs for details."
+
+        - alert: VeleroBackupMissing
+          expr: |
+            time() - velero_backup_last_successful_timestamp{schedule!=""} > 93600
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful Velero backup in 26 hours for schedule {{ $labels.schedule }}"
+            description: "Velero schedule {{ $labels.schedule }} has not completed a successful backup in over 26 hours."
+
+        - alert: VeleroBackupPartialFailure
+          expr: |
+            velero_backup_partial_failure_total > 0
+            unless velero_backup_partial_failure_total offset 10m > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Velero backup partially failed"
+            description: "A Velero backup completed with partial failures. Some resources or volumes may not have been backed up."
+
+    # ── Flux GitOps ───────────────────────────────────────
+    - name: flux
+      rules:
+        - alert: FluxReconciliationFailed
+          expr: gotk_resource_info{ready="False"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flux {{ $labels.exported_namespace }}/{{ $labels.name }} reconciliation failed"
+            description: "Flux resource {{ $labels.name }} in {{ $labels.exported_namespace }} has been in a failed state for 15 minutes."
+
+    # ── GitHub Actions ───────────────────────────────────
+    - name: github-actions
+      rules:
+        - alert: GitHubWorkflowFailed
+          expr: github_workflow_run_status{status="completed"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "GitHub workflow {{ $labels.workflow }} failed"
+            description: "Workflow {{ $labels.workflow }} in {{ $labels.repo }} failed (run #{{ $labels.run_number }}, branch {{ $labels.head_branch }})."
+
+        - alert: GitHubWorkflowStuck
+          expr: github_workflow_run_status == 3
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "GitHub workflow {{ $labels.workflow }} stuck in progress"
+            description: "Workflow {{ $labels.workflow }} in {{ $labels.repo }} has been running for more than 30 minutes (run #{{ $labels.run_number }})."
+
+        - alert: GitHubSelfHostedRunnerOffline
+          expr: github_runner_status == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "GitHub self-hosted runner {{ $labels.name }} is offline"
+            description: "Runner {{ $labels.name }} ({{ $labels.os }}) in {{ $labels.repo }} has been offline for more than 10 minutes."
+
+    # ── Flux Deployment Health ───────────────────────────
+    - name: flux-deployment-health
+      rules:
+        - alert: FluxReconciliationErrorRate
+          expr: |
+            sum by (exported_namespace, name) (
+              rate(gotk_reconcile_condition{type="Ready", status="False"}[15m])
+            )
+            /
+            sum by (exported_namespace, name) (
+              rate(gotk_reconcile_condition{type="Ready"}[15m])
+            ) > 0.25
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Flux {{ $labels.exported_namespace }}/{{ $labels.name }} error rate above 25%"
+            description: "Flux resource {{ $labels.name }} in {{ $labels.exported_namespace }} has a reconciliation error rate of {{ $value | humanizePercentage }} over the last 15 minutes."
+
+        - alert: FluxSourceRevisionStale
+          expr: |
+            time() - gotk_resource_info{kind="GitRepository", ready="True"} * 0
+            + on(exported_namespace, name) group_left()
+              (time() - max by (exported_namespace, name) (gotk_reconcile_time))
+            > 21600
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "Flux GitRepository {{ $labels.exported_namespace }}/{{ $labels.name }} unchanged for 6+ hours"
+            description: "GitRepository {{ $labels.name }} in {{ $labels.exported_namespace }} has not had a new revision in over 6 hours."
+
+        - alert: FluxHelmReleaseSuspendedLong
+          expr: gotk_resource_info{kind="HelmRelease", suspended="true"} == 1
+          for: 72h
+          labels:
+            severity: info
+          annotations:
+            summary: "HelmRelease {{ $labels.exported_namespace }}/{{ $labels.name }} suspended for 72+ hours"
+            description: "HelmRelease {{ $labels.name }} in {{ $labels.exported_namespace }} has been suspended for more than 72 hours. Verify if this is intentional."

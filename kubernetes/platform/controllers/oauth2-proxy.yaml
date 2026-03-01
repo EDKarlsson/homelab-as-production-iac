@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oauth2-proxy
+  labels:
+    toolkit.fluxcd.io/tenant: sre-team
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: oauth2-proxy
+  namespace: oauth2-proxy
+spec:
+  interval: 24h
+  url: http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/helm-oauth2-proxy/
+---
+# Prerequisites before this HelmRelease will reconcile:
+#   1. Keycloak "homelab" realm with "oauth2-proxy" OIDC client (confidential)
+#   2. Audience mapper on client: oauth2-proxy-audience → aud claim
+#   3. 1Password item "oauth2-proxy" with fields: client-id, client-secret, cookie-secret
+#
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: oauth2-proxy
+  namespace: oauth2-proxy
+spec:
+  interval: 30m
+  install:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: oauth2-proxy
+      version: "7.x"
+      sourceRef:
+        kind: HelmRepository
+        name: oauth2-proxy
+        namespace: oauth2-proxy
+      interval: 12h
+  values:
+    image:
+      tag: "v7.14.2"
+    config:
+      existingSecret: oauth2-proxy
+    extraArgs:
+      provider: keycloak-oidc
+      # Keycloak Tailscale URL — tokens issued with this issuer, and the OIDC
+      # authorization endpoint (where users type their password) is served at
+      # keycloak.homelab.ts.net with a real LE cert. Pods resolve this
+      # hostname to 10.0.0.201 via the coredns-custom override; nginx on
+      # that IP serves a cert signed by the homelab CA, which is trusted via
+      # the SSL_CERT_FILE env var below (no skip-verify needed).
+      oidc-issuer-url: "https://keycloak.homelab.ts.net/auth/realms/homelab"
+      # The nip.io domain is the MetalLB LoadBalancer IP encoded as a hostname
+      # (10.0.0.201 → *.10.0.0.201.nip.io). This is the homelab's stable
+      # LAN ingress address; it matches the cookie-domain so SSO sessions persist.
+      redirect-url: "https://oauth2-proxy.10.0.0.201.nip.io/oauth2/callback"
+      email-domain: "*"
+      cookie-secure: "true"
+      set-xauthrequest: "true"
+      set-authorization-header: "true"
+      pass-access-token: "true"
+      scope: "openid profile email"
+      code-challenge-method: S256
+      whitelist-domain: ".10.0.0.201.nip.io"
+      cookie-domain: ".10.0.0.201.nip.io"
+    ingress:
+      enabled: true
+      className: nginx
+      annotations:
+        cert-manager.io/cluster-issuer: homelab-ca-issuer
+        # Keycloak JWTs are large — raise nginx proxy buffer to avoid 502 on /oauth2/callback
+        nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+      hosts:
+        - oauth2-proxy.10.0.0.201.nip.io
+      tls:
+        - secretName: oauth2-proxy-tls
+          hosts:
+            - oauth2-proxy.10.0.0.201.nip.io
+    extraEnv:
+      # Trust the homelab CA so TLS validation works for *.nip.io ingresses
+      # (nginx on 10.0.0.201 serves certs signed by this CA).
+      # The cert is in the homelab-ca-cert ConfigMap (platform/configs/homelab-ca-configmap.yaml).
+      - name: SSL_CERT_FILE
+        value: /etc/ssl/homelab/ca.crt
+    extraVolumes:
+      - name: homelab-ca
+        configMap:
+          name: homelab-ca-cert
+    extraVolumeMounts:
+      - name: homelab-ca
+        mountPath: /etc/ssl/homelab
+        readOnly: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi

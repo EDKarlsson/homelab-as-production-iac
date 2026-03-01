@@ -1,0 +1,24 @@
+---
+# Tailscale Ingress for Keycloak — remote access via tailnet.
+# Accessible at https://keycloak.<tailnet>.ts.net
+# TLS handled automatically by Tailscale (Let's Encrypt).
+#
+# Note: Service name "keycloak-keycloakx-http" is the default created
+# by the codecentric keycloakx chart. Verify with:
+#   kubectl get svc -n keycloak
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-tailscale
+  namespace: keycloak
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: keycloak-keycloakx-http
+      port:
+        number: 80
+  tls:
+    - hosts:
+        - keycloak

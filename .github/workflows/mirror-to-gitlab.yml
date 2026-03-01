@@ -1,0 +1,44 @@
+name: Mirror to GitLab
+
+# Mirrors the homelab-iac repo to the self-hosted GitLab instance after
+# every push to main. Uses the self-hosted homelab runner (which has LAN/
+# Tailscale access to gitlab.homelab.ts.net) to avoid needing a Tailscale
+# auth key in GitHub secrets.
+#
+# Required GitHub secrets:
+#   GITLAB_MIRROR_TOKEN — GitLab personal access token with write_repository scope
+#                         Create at: https://gitlab.homelab.ts.net/-/user_settings/personal_access_tokens
+#
+# Required GitLab project setup (one-time):
+#   1. Create group: homelab (or use your preferred namespace)
+#   2. Create project: homelab/homelab-iac (blank, no README)
+#   3. Copy project URL for the push remote below
+#
+# GitLab will then have an up-to-date mirror of this repo.
+# GitLab CI (.gitlab-ci.yml in this repo) will run on each mirrored push.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  mirror:
+    name: Mirror → GitLab
+    runs-on: [self-hosted, linux, homelab]
+    steps:
+      - name: Checkout (full history for mirror)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to GitLab
+        env:
+          GITLAB_MIRROR_TOKEN: ${{ secrets.GITLAB_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add gitlab \
+            "https://oauth2:${GITLAB_MIRROR_TOKEN}@gitlab.homelab.ts.net/homelab/homelab-iac.git" \
+            2>/dev/null || git remote set-url gitlab \
+            "https://oauth2:${GITLAB_MIRROR_TOKEN}@gitlab.homelab.ts.net/homelab/homelab-iac.git"
+          git push gitlab HEAD:main --force
+          echo "✓ Mirrored to gitlab.homelab.ts.net/homelab/homelab-iac"

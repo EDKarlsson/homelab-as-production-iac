@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-lb
+  namespace: nexus
+  annotations:
+    # 10.0.0.202: next available IP in the MetalLB pool (10.0.0.201-250).
+    # 10.0.0.201 is reserved for ingress-nginx.
+    # This IP is referenced by:
+    #   - infrastructure/main.tf nexus_apt_mirror_url (cloud-init for new VMs)
+    #   - ansible/playbooks/nexus-apt-mirror.yml (existing VMs + PVE hosts)
+    # It must be a raw LAN IP (not ingress-nginx) because apt clients are unauthenticated
+    # and cloud-init runs before the homelab CA cert is installed.
+    metallb.universe.tf/loadBalancerIPs: 10.0.0.202
+spec:
+  type: LoadBalancer
+  # Restrict to homelab LAN — prevents access from outside 10.0.0.0/24.
+  # Nexus anonymous access is enabled (required for apt/pip clients), so this
+  # loadBalancerSourceRanges provides defense-in-depth: even if the LAN is the
+  # trust boundary, there's no reason to accept connections from other subnets.
+  loadBalancerSourceRanges:
+    - 10.0.0.0/24
+  selector:
+    app.kubernetes.io/name: nexus-repository-manager
+    app.kubernetes.io/instance: nexus
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+      protocol: TCP

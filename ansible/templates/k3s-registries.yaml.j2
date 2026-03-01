@@ -1,0 +1,20 @@
+# K3s containerd registry mirrors — route pulls through Nexus proxy cache
+# Deployed by: ansible-playbook playbooks/k3s-registry-mirrors.yml
+# Docs: https://docs.k3s.io/installation/private-registry
+#
+# Containerd tries the mirror first. If Nexus is unreachable, falls back to
+# the upstream registry automatically (default K3s behavior).
+#
+# HTTP is intentional — this is LAN-internal traffic between K3s hosts and
+# Nexus. TLS would require certificate trust configuration on every node.
+
+mirrors:
+  docker.io:
+    endpoint:
+      - "http://{{ nexus_registry_url }}/repository/docker-hub/v2"
+  ghcr.io:
+    endpoint:
+      - "http://{{ nexus_registry_url }}/repository/docker-ghcr/v2"
+  quay.io:
+    endpoint:
+      - "http://{{ nexus_registry_url }}/repository/docker-quay/v2"

@@ -1,0 +1,78 @@
+# Plex Media Server — kustomize strategic merge patch for HelmRelease
+# Manual step: Get claim token from https://plex.tv/claim (valid ~4 minutes)
+#   then uncomment PLEX_CLAIM below before first deploy
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: plex
+  namespace: media
+spec:
+  values:
+    image:
+      registry: index.docker.io
+      repository: plexinc/pms-docker
+      tag: latest
+      pullPolicy: IfNotPresent
+
+    pms:
+      storageClassName: nfs-kubernetes
+      configStorage: 5Gi
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 4000m
+          memory: 4Gi
+
+    ingress:
+      enabled: true
+      ingressClassName: nginx
+      url: plex.10.0.0.201.nip.io
+      certificateSecret: plex-tls
+      annotations:
+        cert-manager.io/cluster-issuer: homelab-ca-issuer
+
+    extraEnv:
+      PLEX_CLAIM: "claim-vf9TXgusrp1Ayk9rzydU"  # Uncomment and set before first deploy
+      TZ: "America/Los_Angeles"
+      ALLOWED_NETWORKS: "10.0.0.0/24,10.42.0.0/16,10.43.0.0/16"
+
+    # NAS media libraries (read-only NFS mounts via static PV/PVCs)
+    extraVolumeMounts:
+      - name: movies
+        mountPath: /data/movies
+        readOnly: true
+      - name: music
+        mountPath: /data/music
+        readOnly: true
+      - name: photos
+        mountPath: /data/photos
+        readOnly: true
+      - name: adult
+        mountPath: /data/adult
+        readOnly: true
+      - name: adult-v3
+        mountPath: /data/adult-v3
+        readOnly: true
+
+    extraVolumes:
+      - name: movies
+        persistentVolumeClaim:
+          claimName: plex-movies
+      - name: music
+        persistentVolumeClaim:
+          claimName: plex-music
+      - name: photos
+        persistentVolumeClaim:
+          claimName: plex-photos
+      - name: adult
+        persistentVolumeClaim:
+          claimName: plex-adult
+      - name: adult-v3
+        persistentVolumeClaim:
+          claimName: plex-adult-v3
+
+    service:
+      type: ClusterIP
+      port: 32400

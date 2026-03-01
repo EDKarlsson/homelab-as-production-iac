@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wikijs
+  namespace: wikijs
+  labels:
+    app.kubernetes.io/name: wikijs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wikijs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wikijs
+    spec:
+      containers:
+        - name: wikijs
+          image: requarks/wiki:2.5.312
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: DB_TYPE
+              value: postgres
+            - name: DB_HOST
+              value: "10.0.0.44"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: wikijs
+            - name: DB_USER
+              value: wikijs
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: wikijs-secrets
+                  key: db-password
+          volumeMounts:
+            - name: git-ssh-key
+              mountPath: /home/node/.ssh/id_ed25519
+              subPath: git-ssh-key
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: git-ssh-key
+          secret:
+            secretName: wikijs-secrets
+            defaultMode: 0400
+            items:
+              - key: git-ssh-key
+                path: git-ssh-key

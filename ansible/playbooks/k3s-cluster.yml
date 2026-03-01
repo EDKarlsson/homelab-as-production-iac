@@ -1,0 +1,13 @@
+---
+# K3s Full Cluster Provisioning (Site Playbook)
+# Provisions servers first, then agents.
+#
+# Usage:
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/k3s-cluster.yml
+
+- name: Provision K3s servers
+  ansible.builtin.import_playbook: k3s-servers.yml
+
+- name: Provision K3s agents
+  ansible.builtin.import_playbook: k3s-agents.yml

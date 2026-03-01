@@ -1,0 +1,296 @@
+#cloud-config
+# PostgreSQL Standby — hot standby via streaming replication from primary
+# Uses pg_basebackup to clone primary, then streams WAL continuously
+# Keepalived health check ensures VIP only lives on the primary
+
+hostname: ${hostname}
+fqdn: ${hostname}.homelab.local
+
+users:
+  - name: ${username}
+    groups: [adm, sudo]
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - postgresql
+  - postgresql-contrib
+  - postgresql-client
+  - keepalived
+  - curl
+  - wget
+  - jq
+  - htop
+  - net-tools
+  - unzip
+  - git
+  - logrotate
+  - nfs-common
+  - qemu-guest-agent
+
+runcmd:
+  # --- Partition and mount data disk ---
+  - |
+    parted /dev/sdb --script mklabel gpt
+    parted -a optimal /dev/sdb --script mkpart primary ext4 0% 100%
+    mkfs.ext4 /dev/sdb1
+    mkdir -p /mnt/data
+    DB_UUID=$(blkid -s UUID -o value /dev/sdb1)
+    echo "UUID=$DB_UUID /mnt/data ext4 defaults 0 2" >> /etc/fstab
+    mount -a
+
+  # --- Stop PostgreSQL and prepare for basebackup ---
+  - |
+    systemctl stop postgresql
+    PG_VERSION=$(psql -V | awk '{print $3}' | cut -d. -f1)
+
+    # Remove default data directory (will be replaced by basebackup)
+    rm -rf /var/lib/postgresql/$PG_VERSION/main
+
+    # Create data directory on the data disk
+    mkdir -p /mnt/data/postgresql/$PG_VERSION/main
+    chown postgres:postgres /mnt/data/postgresql/$PG_VERSION/main
+    chmod 700 /mnt/data/postgresql/$PG_VERSION/main
+
+    # Update data_directory in postgresql.conf
+    sed -i "s|data_directory = .*|data_directory = '/mnt/data/postgresql/$PG_VERSION/main'|" /etc/postgresql/$PG_VERSION/main/postgresql.conf
+
+  # --- Clone primary via pg_basebackup ---
+  - |
+    PG_VERSION=$(psql -V | awk '{print $3}' | cut -d. -f1)
+
+    # Create .pgpass for non-interactive authentication
+    echo "${primary_ip}:5432:replication:replicator:${replication_password}" > /var/lib/postgresql/.pgpass
+    chown postgres:postgres /var/lib/postgresql/.pgpass
+    chmod 600 /var/lib/postgresql/.pgpass
+
+    # pg_basebackup from primary
+    # -R: create standby.signal + write primary_conninfo to postgresql.auto.conf
+    # -Fp: plain format (ready to use as data directory)
+    # -Xs: stream WAL during backup (no gaps)
+    sudo -u postgres pg_basebackup \
+      -h ${primary_ip} \
+      -U replicator \
+      -D /mnt/data/postgresql/$PG_VERSION/main \
+      -Fp -Xs -R -P
+
+  # --- Configure standby-specific settings ---
+  - |
+    PG_VERSION=$(psql -V | awk '{print $3}' | cut -d. -f1)
+    PG_CONFIG_DIR="/etc/postgresql/$PG_VERSION/main"
+
+    # Listen on all interfaces
+    sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONFIG_DIR/postgresql.conf"
+
+    # hot_standby allows read-only queries on the standby
+    cat >> "$PG_CONFIG_DIR/postgresql.conf" << EOF
+
+    # Standby configuration
+    hot_standby = on
+    hot_standby_feedback = on
+
+    # Logging (same as primary for consistency)
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = 'log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_file_mode = 0600
+    log_rotation_age = 1d
+    log_rotation_size = 10MB
+    log_min_duration_statement = 1000
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    EOF
+
+  # --- Start PostgreSQL (will begin streaming from primary) ---
+  - systemctl start postgresql
+  - systemctl enable postgresql
+
+  # --- Mount NAS for backup storage ---
+  - |
+    mkdir -p /mnt/nas-backups
+    echo "192.168.2.161:/volume1/postgresql-backups /mnt/nas-backups nfs defaults,nofail,soft,timeo=30,retrans=3 0 0" >> /etc/fstab
+    mount -a || true
+
+  # --- Create backup script (Tier 2 — same as primary, VIP guard prevents execution on standby) ---
+  - |
+    cat > /usr/local/bin/backup-pg-dbs.sh << 'SCRIPT'
+    #!/bin/bash
+    set -euo pipefail
+    BACKUP_DIR="/var/backups/postgresql"
+    NAS_MOUNT="/mnt/nas-backups"
+    LOCAL_RETENTION=7
+    NAS_RETENTION=30
+    VIP="${vip}"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    HOSTNAME=$(hostname)
+    ERRORS=()
+
+    log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+    # VIP guard: only back up on the current primary
+    if ! ip addr show | grep -q "$VIP"; then
+        log "Not VIP holder ($VIP not on this node). Skipping backup."
+        exit 0
+    fi
+
+    log "=== PostgreSQL backup starting on $HOSTNAME (VIP holder) ==="
+    mkdir -p "$BACKUP_DIR"
+
+    for db in k3s terraform_state keycloak n8n wikijs teamcity coder windmill; do
+      log "Dumping $db..."
+      BACKUP_FILE="$BACKUP_DIR/$db-$TIMESTAMP.sql.gz"
+      if sudo -u postgres pg_dump "$db" | gzip > "$BACKUP_FILE"; then
+        log "  OK ($(du -h "$BACKUP_FILE" | cut -f1))"
+      else
+        ERRORS+=("$db")
+        log "  FAILED"
+        rm -f "$BACKUP_FILE"
+      fi
+    done
+
+    # Local retention
+    find "$BACKUP_DIR" -name "*.sql.gz" -mtime +$LOCAL_RETENTION -delete
+
+    # NAS sync (if mounted)
+    if mountpoint -q "$NAS_MOUNT" 2>/dev/null; then
+      NAS_DIR="$NAS_MOUNT/$HOSTNAME"
+      mkdir -p "$NAS_DIR"
+      for f in "$BACKUP_DIR"/*-$TIMESTAMP.sql.gz; do
+        [ -f "$f" ] && cp "$f" "$NAS_DIR/" && log "  Copied $(basename "$f") to NAS"
+      done
+      find "$NAS_DIR" -name "*.sql.gz" -mtime +$NAS_RETENTION -delete
+    else
+      log "WARNING: NAS not mounted at $NAS_MOUNT. Local backup only."
+    fi
+
+    log "=== Backup complete: $${#ERRORS[@]} errors ==="
+    [ $${#ERRORS[@]} -eq 0 ] || exit 1
+    SCRIPT
+    chmod +x /usr/local/bin/backup-pg-dbs.sh
+
+  # --- Configure keepalived ---
+  - |
+    cat > /usr/local/bin/pg-health-check.sh << 'SCRIPT'
+    #!/bin/bash
+    # Returns 0 if PG is accepting connections (running), 1 otherwise.
+    # Role detection is NOT checked here — keepalived priorities handle
+    # VIP placement, notify script handles promotion.
+    pg_isready -q || exit 1
+    exit 0
+    SCRIPT
+    chmod +x /usr/local/bin/pg-health-check.sh
+
+  - |
+    cat > /usr/local/bin/keepalived-notify.sh << 'SCRIPT'
+    #!/bin/bash
+    # Called by keepalived on state transitions
+    TYPE=$1   # INSTANCE
+    NAME=$2   # VI_POSTGRES
+    STATE=$3  # MASTER|BACKUP|FAULT
+
+    case $STATE in
+      MASTER)
+        if sudo -u postgres psql -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | grep -q "t"; then
+          PG_VERSION=$(pg_lsclusters -h | awk '{print $1}')
+          sudo -u postgres pg_ctlcluster "$PG_VERSION" main promote
+          logger "keepalived: PostgreSQL PROMOTED to primary"
+        else
+          logger "keepalived: PostgreSQL already primary, VIP acquired"
+        fi
+        ;;
+      BACKUP|FAULT)
+        logger "keepalived: PostgreSQL entering $STATE state"
+        ;;
+    esac
+    SCRIPT
+    chmod +x /usr/local/bin/keepalived-notify.sh
+
+  - systemctl enable --now keepalived
+
+  # --- Verify standby is streaming ---
+  - |
+    sleep 10
+    is_recovery=$(sudo -u postgres psql -tAc "SELECT pg_is_in_recovery();")
+    if [ "$is_recovery" = "t" ]; then
+      echo "PostgreSQL standby is in recovery mode (streaming from primary)"
+    else
+      echo "WARNING: Standby is NOT in recovery mode — check replication"
+    fi
+
+write_files:
+  - path: /etc/keepalived/keepalived.conf
+    content: |
+      vrrp_script check_postgres {
+          script "/usr/local/bin/pg-health-check.sh"
+          interval 5
+          weight -20
+          fall 2
+          rise 2
+          user root
+      }
+
+      vrrp_instance VI_POSTGRES {
+          state ${keepalived_state}
+          interface eth0
+          virtual_router_id 44
+          priority ${keepalived_priority}
+          advert_int 1
+
+          unicast_src_ip ${node_ip}
+          unicast_peer {
+              ${peer_ip}
+          }
+
+          authentication {
+              auth_type PASS
+              auth_pass pgha44
+          }
+
+          virtual_ipaddress {
+              ${vip}/24
+          }
+
+          track_script {
+              check_postgres
+          }
+
+          notify /usr/local/bin/keepalived-notify.sh
+      }
+    permissions: '0644'
+
+  - path: /etc/cron.d/pg-backup
+    content: |
+      # PostgreSQL per-database backup (Tier 2)
+      # VIP guard ensures only the current primary executes
+      0 */6 * * * root /usr/local/bin/backup-pg-dbs.sh >> /var/log/pg-backup.log 2>&1
+    permissions: '0644'
+
+  - path: /etc/logrotate.d/pg-backup
+    content: |
+      /var/log/pg-backup.log {
+        daily
+        missingok
+        rotate 30
+        compress
+        delaycompress
+        notifempty
+        copytruncate
+      }
+    permissions: '0644'
+
+final_message: |
+  PostgreSQL Standby ${hostname} installation completed!
+
+  HA Configuration:
+  - Role: Standby (${keepalived_state})
+  - Node IP: ${node_ip}
+  - Primary: ${primary_ip}
+  - VIP: ${vip}
+  - Streaming replication: active
+  - Backup: ready (VIP guard — executes only if promoted to primary)

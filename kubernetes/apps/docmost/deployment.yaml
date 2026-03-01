@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docmost
+  namespace: docmost
+  labels:
+    app.kubernetes.io/name: docmost
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docmost
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docmost
+    spec:
+      containers:
+        - name: docmost
+          image: docmost/docmost:0.8.2
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: APP_URL
+              value: "https://docmost.homelab.ts.net"
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: docmost-secrets
+                  key: app-secret
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: docmost-secrets
+                  key: database-url
+            - name: REDIS_URL
+              value: "redis://redis.docmost.svc.cluster.local:6379"
+          volumeMounts:
+            - name: storage
+              mountPath: /app/data/storage
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: docmost-storage

@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: code-server-tailscale
+  namespace: code-server
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: code-server
+      port:
+        number: 8080
+  tls:
+    - hosts:
+        - code-server

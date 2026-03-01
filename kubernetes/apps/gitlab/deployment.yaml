@@ -1,0 +1,206 @@
+# GitLab CE — self-hosted Git forge (omnibus container)
+#
+# Image: gitlab/gitlab-ce
+# Docs: https://docs.gitlab.com/install/docker/
+#
+# Uses built-in PostgreSQL and Redis (omnibus manages everything).
+# nginx inside the container is disabled — K8s ingress handles TLS/routing.
+#
+# Resource intensive: minimum 4GB RAM, 2 CPU. First boot takes several minutes
+# while GitLab runs database migrations and initializes services.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab
+  namespace: gitlab
+  labels:
+    app.kubernetes.io/name: gitlab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitlab
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitlab
+    spec:
+      initContainers:
+        # ConfigMap subPath mounts are immutable — GitLab Omnibus's add_trusted_certs
+        # recipe tries to move/rename files in /etc/gitlab/trusted-certs/, which fails
+        # with EROFS on subPath mounts. Copy the cert into the config PVC instead so
+        # Omnibus sees a regular writable file it can process normally.
+        - name: install-ca-cert
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /etc/gitlab/trusted-certs
+              cp /tmp/ca/homelab-ca.crt /etc/gitlab/trusted-certs/homelab-ca.crt
+              echo "CA cert installed"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gitlab
+            - name: homelab-ca
+              mountPath: /tmp/ca
+              readOnly: true
+      containers:
+        - name: gitlab
+          image: gitlab/gitlab-ce:18.9.0-ce.0
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: GITLAB_OMNIBUS_CONFIG
+              value: |
+                external_url 'https://gitlab.homelab.ts.net'
+                nginx['listen_port'] = 80
+                nginx['listen_https'] = false
+                nginx['proxy_set_headers'] = {
+                  "X-Forwarded-Proto" => "https",
+                  "X-Forwarded-Ssl" => "on"
+                }
+                prometheus_monitoring['enable'] = false
+                # SSH clone URL host — separate Tailscale node (L4 TCP forwarding).
+                # The HTTP ingress uses 'gitlab.homelab.ts.net'; SSH uses a distinct
+                # 'gitlab-ssh.homelab.ts.net' node created by tailscale-ssh-service.yaml.
+                gitlab_rails['gitlab_ssh_host'] = 'gitlab-ssh.homelab.ts.net'
+                gitlab_rails['gitlab_shell_ssh_port'] = 22
+                # Allow Prometheus (running in-cluster) to scrape /-/metrics.
+                # Restricted to K3s pod CIDR — only in-cluster pods can reach this endpoint.
+                gitlab_rails['monitoring_whitelist'] = ['10.42.0.0/16']
+                puma['worker_processes'] = 2
+                sidekiq['concurrency'] = 5
+                # SMTP — Google Workspace / Gmail App Password
+                # SMTP_PASSWORD is injected as a separate env var from smtp-credentials Secret
+                gitlab_rails['smtp_enable'] = true
+                gitlab_rails['smtp_address'] = ENV['SMTP_HOST']
+                gitlab_rails['smtp_port'] = (ENV['SMTP_PORT'] || 587).to_i
+                gitlab_rails['smtp_user_name'] = ENV['SMTP_USERNAME']
+                gitlab_rails['smtp_password'] = ENV['SMTP_PASSWORD']
+                gitlab_rails['smtp_domain'] = ENV['SMTP_FROM'].split('@').last if ENV['SMTP_FROM']
+                gitlab_rails['smtp_authentication'] = 'login'
+                gitlab_rails['smtp_enable_starttls_auto'] = true
+                gitlab_rails['smtp_tls'] = false
+                gitlab_rails['gitlab_email_from'] = ENV['SMTP_FROM']
+                gitlab_rails['gitlab_email_reply_to'] = ENV['SMTP_FROM']
+                # Keycloak OIDC SSO — users can log in with their Keycloak account.
+                # Credentials injected from gitlab-keycloak-oidc Secret (via ExternalSecret).
+                # To disable local password login after SSO is confirmed working:
+                #   gitlab_rails['prevent_ldap_sign_in'] = true (not needed for OIDC)
+                # To make SSO the default login method, set omniauth_auto_sign_in_with_provider.
+                gitlab_rails['omniauth_enabled'] = true
+                gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+                gitlab_rails['omniauth_block_auto_created_users'] = false
+                gitlab_rails['omniauth_providers'] = [
+                  {
+                    'name' => 'openid_connect',
+                    'label' => 'Keycloak SSO',
+                    'icon' => 'https://www.keycloak.org/resources/images/logo.svg',
+                    'args' => {
+                      'name' => 'openid_connect',
+                      'scope' => ['openid', 'profile', 'email'],
+                      'response_type' => 'code',
+                      'issuer' => 'https://keycloak.homelab.ts.net/auth/realms/homelab',
+                      'client_auth_method' => 'query',
+                      'discovery' => true,
+                      'uid_field' => 'preferred_username',
+                      'pkce' => true,
+                      'client_options' => {
+                        'identifier' => ENV['KEYCLOAK_CLIENT_ID'],
+                        'secret' => ENV['KEYCLOAK_CLIENT_SECRET'],
+                        'redirect_uri' => 'https://gitlab.homelab.ts.net/users/auth/openid_connect/callback'
+                      }
+                    }
+                  }
+                ]
+            # Keycloak OIDC credentials from ExternalSecret (gitlab-keycloak-oidc 1Password item)
+            - name: KEYCLOAK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-keycloak-oidc
+                  key: client-id
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-keycloak-oidc
+                  key: client-secret
+            # SMTP credentials from ExternalSecret (google-smtp 1Password item)
+            - name: SMTP_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: host
+            - name: SMTP_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: port
+            - name: SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: username
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: password
+            - name: SMTP_FROM
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: from
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gitlab
+            - name: data
+              mountPath: /var/opt/gitlab
+            - name: logs
+              mountPath: /var/log/gitlab
+            # homelab-ca cert installed by initContainer into /etc/gitlab/trusted-certs/
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 20
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 60
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: gitlab-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: gitlab-data
+        - name: logs
+          persistentVolumeClaim:
+            claimName: gitlab-logs
+        - name: homelab-ca
+          configMap:
+            name: homelab-ca-cert

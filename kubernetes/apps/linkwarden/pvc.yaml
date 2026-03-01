@@ -1,0 +1,14 @@
+# Linkwarden data — screenshots, PDFs, profile photos
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linkwarden-data
+  namespace: linkwarden
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 10Gi

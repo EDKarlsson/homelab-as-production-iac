@@ -1,0 +1,250 @@
+---
+# GitLab Shell Runner — Homelab Node
+# Installs and registers a GitLab shell runner with the 'homelab' tag on
+# k3s_servers[0] (homelab-server-node-02, 10.0.0.50).
+#
+# The server node is chosen because it has the K3s admin kubeconfig at
+# /etc/rancher/k3s/k3s.yaml — required by homelab-smoke.sh (kubectl calls).
+#
+# Prerequisites:
+#   1. Create a runner in GitLab UI:
+#        Admin Area → CI/CD → Runners → New instance runner
+#        (or: Project → Settings → CI/CD → Runners → New project runner)
+#        Tags: homelab | Run untagged jobs: false | Save → copy the glrt- token
+#   2. Store the token in 1Password (Homelab vault):
+#        Item name:  gitlab-runner-homelab
+#        Section:    runner          (custom section)
+#        Fields:     token  → glrt-XXXXXXXXXXXXXXXX   (custom text)
+#
+# Usage:
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/gitlab-runner-shell.yml --forks=1
+#
+# To pass the token without 1Password (CI or first bootstrap):
+#   ansible-playbook ... --forks=1 -e gitlab_runner_token=glrt-XXXXXX
+
+- name: Install and register GitLab shell runner
+  hosts: k3s_servers[0]
+  become: true
+
+  vars:
+    # Tool versions — keep in sync with .gitlab-ci.yml and docs/reference/version-matrix.md
+    yq_version: "v4.44.5"
+    yq_checksum: "sha256:42e1983dc2c14eb4f4d05fcf8cc1060c5323d7d018c65b9a148a9508e3b0e353"
+    flux_version: "v2.7.5"
+    flux_checksum: "sha256:1e92141e8498289e4b27411385aeb18396053176cf297b0cb99abd6ca8293e75"
+
+    # Use the LAN nip.io ingress — K3s VMs are not Tailscale nodes and cannot
+    # resolve gitlab.homelab.ts.net.  The homelab CA (installed below) allows
+    # gitlab-runner to trust the nip.io TLS cert for ongoing API calls.
+    gitlab_instance_url: "https://gitlab.10.0.0.201.nip.io"
+    runner_name: "homelab-shell-homelab-kcs-1"
+
+    # Runner authentication token — supplied via 1Password or -e override.
+    # This glrt- token is consumed once during 'gitlab-runner register'.
+    gitlab_runner_token: >-
+      {{ lookup('community.general.onepassword', 'gitlab-runner-homelab',
+         field='token', section='runner', vault='Homelab') }}
+
+    # Homelab self-signed CA cert — same cert stored in the homelab-ca-cert ConfigMap.
+    # Inlined here rather than loaded from a file so the playbook is self-contained
+    # for bootstrap scenarios where the ConfigMap may not yet be applied.
+    # Source of truth: kubernetes/platform/controllers/homelab-ca-configmap.yaml
+    # Rotate by updating that file and re-running this playbook.
+    homelab_ca_cert: |
+      -----BEGIN CERTIFICATE-----
+      MIIBajCCARCgAwIBAgIQcrAwy52SWx3fOtuTSaMdsDAKBggqhkjOPQQDAjAVMRMw
+      EQYDVQQDEwpIb21lbGFiIENBMB4XDTI2MDIxNjIzMjQzOFoXDTM2MDIxNDIzMjQz
+      OFowFTETMBEGA1UEAxMKSG9tZWxhYiBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEH
+      A0IABBhTk0GPOltg/HRvIEL1t+2WxnTI562uUxBC4rNH+m4F9nKl9XmjWgsg3pkf
+      pGADtRMwFbL4niFJCG5NN5TT+ACjQjBAMA4GA1UdDwEB/wQEAwICpDAPBgNVHRMB
+      Af8EBTADAQH/MB0GA1UdDgQWBBTGMqQ7eYBoSik03sAGBXxcFhWc7TAKBggqhkjO
+      PQQDAgNIADBFAiEArlouB7CdA5XqtOM75BKXh7fvtw0dRBvdMWHwK483ORACIFwe
+      MUq5oh77s4OUFH6R/op/V3VG2TWUY8bNYYI9ssN7
+      -----END CERTIFICATE-----
+
+  tasks:
+    # ── System prerequisites ──────────────────────────────────────────────────
+
+    - name: Install required apt packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - wget
+          - git
+          - jq
+          - python3
+          - ca-certificates
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: true
+
+    # ── Homelab CA ────────────────────────────────────────────────────────────
+    # Installs the self-signed homelab CA so that curl/python3 in CI jobs can
+    # validate TLS certs on *.10.0.0.201.nip.io ingresses without skipping
+    # verification.  Required by generate-sbom.sh (DT API call over HTTPS) and
+    # by gitlab-runner itself when contacting the GitLab nip.io ingress.
+    #
+    # Converted from a handler to an inline task so that the bundle update runs
+    # immediately — Ansible handlers are skipped if the play aborts before
+    # completing, which previously caused 'x509: unknown authority' on registration.
+
+    - name: Install homelab CA certificate
+      ansible.builtin.copy:
+        content: "{{ homelab_ca_cert }}"
+        dest: /usr/local/share/ca-certificates/homelab-ca.crt
+        mode: "0644"
+      register: ca_cert_task
+
+    # noqa: no-handler — intentionally a task, not a handler. Handlers are
+    # skipped if the play aborts before completion (e.g. on registration failure),
+    # which caused 'x509: unknown authority' on the first run of this playbook.
+    - name: Update CA certificate bundle  # noqa: no-handler
+      ansible.builtin.command: update-ca-certificates
+      when: ca_cert_task.changed
+      changed_when: ca_cert_task.changed
+
+    # ── yq ────────────────────────────────────────────────────────────────────
+
+    - name: Check yq version
+      ansible.builtin.command: yq --version
+      register: yq_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Install yq {{ yq_version }}
+      ansible.builtin.get_url:
+        url: "https://github.com/mikefarah/yq/releases/download/{{ yq_version }}/yq_linux_amd64"
+        dest: /usr/local/bin/yq
+        mode: "0755"
+        checksum: "{{ yq_checksum }}"
+      when: yq_version not in (yq_installed.stdout | default(''))
+
+    # ── flux CLI ──────────────────────────────────────────────────────────────
+
+    - name: Check flux version
+      ansible.builtin.command: flux --version
+      register: flux_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Download flux CLI archive {{ flux_version }}
+      ansible.builtin.get_url:
+        url: "https://github.com/fluxcd/flux2/releases/download/{{ flux_version }}/flux_{{ flux_version | regex_replace('^v', '') }}_linux_amd64.tar.gz"
+        dest: /tmp/flux.tar.gz
+        checksum: "{{ flux_checksum }}"
+        mode: "0644"
+      when: flux_version not in (flux_installed.stdout | default(''))
+
+    - name: Install flux CLI {{ flux_version }}
+      ansible.builtin.unarchive:
+        src: /tmp/flux.tar.gz
+        dest: /usr/local/bin
+        include:
+          - flux
+        mode: "0755"
+      when: flux_version not in (flux_installed.stdout | default(''))
+
+    # ── GitLab runner ─────────────────────────────────────────────────────────
+    # GPG key: downloaded over HTTPS without a separate checksum because the key
+    # is legitimately rotated by GitLab and a pinned hash would break upgrades.
+    # The dearmor + signed-by apt repo chain provides integrity for packages.
+
+    - name: Download GitLab runner apt repo GPG key
+      ansible.builtin.get_url:
+        url: https://packages.gitlab.com/runner/gitlab-runner/gpgkey
+        dest: /tmp/gitlab-runner-gpgkey.asc
+        mode: "0644"
+
+    - name: Dearmor GitLab runner GPG key
+      ansible.builtin.command: >-
+        gpg --dearmor -o /usr/share/keyrings/gitlab-runner-keyring.gpg
+        /tmp/gitlab-runner-gpgkey.asc
+      args:
+        creates: /usr/share/keyrings/gitlab-runner-keyring.gpg
+
+    - name: Add GitLab runner apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/gitlab-runner-keyring.gpg]
+          https://packages.gitlab.com/runner/gitlab-runner/ubuntu/
+          {{ ansible_distribution_release }} main
+        filename: gitlab-runner
+        state: present
+
+    - name: Install gitlab-runner
+      ansible.builtin.apt:
+        name: gitlab-runner
+        state: present
+        update_cache: true
+
+    # ── kubectl access for the runner user ────────────────────────────────────
+    # The gitlab-runner user gets a copy of the K3s admin kubeconfig so that
+    # homelab-smoke.sh can run kubectl without extra environment configuration.
+    #
+    # Security note: this grants cluster-admin to any CI job on this runner.
+    # Acceptable for a single-tenant homelab where all jobs are owner-controlled.
+    # For a multi-tenant setup, replace with a limited ServiceAccount kubeconfig
+    # scoped to read-only access on the namespaces checked by homelab-smoke.sh.
+
+    - name: Create .kube directory for gitlab-runner user
+      ansible.builtin.file:
+        path: /home/gitlab-runner/.kube
+        state: directory
+        owner: gitlab-runner
+        group: gitlab-runner
+        mode: "0700"
+
+    - name: Copy K3s admin kubeconfig to gitlab-runner home
+      ansible.builtin.copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/gitlab-runner/.kube/config
+        remote_src: true
+        owner: gitlab-runner
+        group: gitlab-runner
+        mode: "0600"
+
+    # ── Runner registration ───────────────────────────────────────────────────
+    # Idempotency: 'gitlab-runner list' writes registered runner names to stderr.
+    # Registration is skipped if runner_name already appears in that output.
+    # The check uses '+ " "' to avoid substring false-positives — the runner name
+    # in list output is always followed by whitespace before the Executor column.
+    # To re-register, remove /etc/gitlab-runner/config.toml and re-run.
+
+    - name: Check if runner is already registered
+      ansible.builtin.command: gitlab-runner list
+      register: runner_list_output
+      changed_when: false
+
+    - name: Register GitLab shell runner
+      ansible.builtin.command: >-
+        gitlab-runner register
+        --non-interactive
+        --url "{{ gitlab_instance_url }}"
+        --token "{{ gitlab_runner_token }}"
+        --executor shell
+        --name "{{ runner_name }}"
+      when: (runner_name + ' ') not in runner_list_output.stderr
+      changed_when: true
+      no_log: true   # token is in the command args
+      # Note: with glrt- runner auth tokens (GitLab 16+), --tag-list, --run-untagged,
+      # --locked etc. are configured on the GitLab server when creating the token —
+      # they cannot be passed here. See: https://docs.gitlab.com/ci/runners/new_creation_workflow/
+
+    - name: Ensure gitlab-runner service is started and enabled
+      ansible.builtin.systemd:
+        name: gitlab-runner
+        state: started
+        enabled: true
+
+    # ── Verification ──────────────────────────────────────────────────────────
+
+    - name: Show registered runners
+      ansible.builtin.command: gitlab-runner list
+      changed_when: false
+      register: runner_list_final
+
+    - name: Display runner status
+      ansible.builtin.debug:
+        msg: "{{ runner_list_final.stderr_lines }}"

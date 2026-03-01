@@ -1,0 +1,5 @@
+# Legacy kube-prometheus-stack manifests (commented out, superseded by Flux HelmRelease)
+# Kept in _todo for reference
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []

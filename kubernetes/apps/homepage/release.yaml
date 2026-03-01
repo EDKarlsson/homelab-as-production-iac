@@ -1,0 +1,399 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: homepage
+  namespace: homepage
+spec:
+  interval: 50m
+  install:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: homepage
+      version: "2.x"
+      sourceRef:
+        kind: HelmRepository
+        name: jameswynn
+        namespace: homepage
+      interval: 12h
+  values:
+    image:
+      repository: ghcr.io/gethomepage/homepage
+      tag: v1.10.1
+    enableRbac: true
+    serviceAccount:
+      create: true
+    service:
+      main:
+        ports:
+          http:
+            port: 3000
+    ingress:
+      main:
+        enabled: true
+        ingressClassName: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: homelab-ca-issuer
+          nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.oauth2-proxy.svc.cluster.local/oauth2/auth"
+          nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.10.0.0.201.nip.io/oauth2/start?rd=$scheme://$host$request_uri"
+          nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Access-Token"
+        hosts:
+          - host: homepage.10.0.0.201.nip.io
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: homepage-tls
+            hosts:
+              - homepage.10.0.0.201.nip.io
+    env:
+      - name: HOMEPAGE_ALLOWED_HOSTS
+        value: "homepage.10.0.0.201.nip.io,homepage.homelab.ts.net"
+      - name: TZ
+        value: America/Los_Angeles
+      # Widget credentials — pulled from 1Password item "homepage-widgets" via ExternalSecret
+      # All optional: true so Homepage starts even before credentials are configured
+      - name: HOMEPAGE_VAR_GRAFANA_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: grafana-password
+            optional: true
+      - name: HOMEPAGE_VAR_PLEX_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: plex-token
+            optional: true
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+      - name: HOMEPAGE_VAR_PORTAINER_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: portainer-api-key
+            optional: true
+      - name: HOMEPAGE_VAR_GITLAB_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: gitlab-token
+            optional: true
+      - name: HOMEPAGE_VAR_LINKWARDEN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: linkwarden-token
+            optional: true
+      - name: HOMEPAGE_VAR_CALIBRE_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: calibre-password
+            optional: true
+      - name: HOMEPAGE_VAR_TAILSCALE_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: tailscale-api-key
+            optional: true
+      - name: HOMEPAGE_VAR_PROXMOX_URL
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: proxmox-url
+            optional: true
+      - name: HOMEPAGE_VAR_PROXMOX_TOKEN_ID
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: proxmox-token-id
+            optional: true
+      - name: HOMEPAGE_VAR_PROXMOX_TOKEN_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: proxmox-token-secret
+            optional: true
+      - name: HOMEPAGE_VAR_DISKSTATION_USERNAME
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: diskstation-username
+            optional: true
+      - name: HOMEPAGE_VAR_DISKSTATION_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: homepage-widget-secrets
+            key: diskstation-password
+            optional: true
+    config:
+      kubernetes:
+        mode: cluster
+      settingsString: |
+        title: Homelab
+        theme: dark
+        color: slate
+        headerStyle: boxedWidgets
+        useEqualHeights: true
+        background:
+          image: https://cdnb.artstation.com/p/assets/images/images/006/897/659/large/mikael-gustafsson-wallpaper-mikael-gustafsson.jpg
+          blur: sm
+          saturate: 50
+          brightness: 50
+          opacity: 50
+        layout:
+          Platform:
+            style: row
+            columns: 3
+          Network & Security:
+            style: row
+            columns: 3
+          Monitoring:
+            style: row
+            columns: 2
+          Media:
+            style: row
+            columns: 4
+          Services:
+            style: row
+            columns: 3
+          Dev:
+            style: row
+            columns: 4
+        providers:
+          longhorn:
+            url: http://longhorn-frontend.longhorn-system.svc.cluster.local
+      bookmarks: []
+      services:
+        - Platform:
+            - Portainer:
+                href: https://portainer.homelab.ts.net
+                description: Container management
+                icon: portainer.png
+                widget:
+                  type: portainer
+                  url: http://portainer.portainer.svc.cluster.local:9000
+                  env: 1
+                  kubernetes: true
+                  key: "{{HOMEPAGE_VAR_PORTAINER_API_KEY}}"
+            - Proxmox:
+                href: https://node-02.homelab.ts.net:8006
+                description: Hypervisor cluster
+                icon: proxmox.png
+                widget:
+                  type: proxmox
+                  url: "{{HOMEPAGE_VAR_PROXMOX_URL}}"
+                  username: "{{HOMEPAGE_VAR_PROXMOX_TOKEN_ID}}"
+                  password: "{{HOMEPAGE_VAR_PROXMOX_TOKEN_SECRET}}"
+            - Leviathan:
+                href: https://leviathan.homelab.ts.net:5001
+                description: Synology NAS
+                icon: synology-dsm.png
+                widget:
+                  type: diskstation
+                  url: http://10.0.0.161:5000
+                  username: "{{HOMEPAGE_VAR_DISKSTATION_USERNAME}}"
+                  password: "{{HOMEPAGE_VAR_DISKSTATION_PASSWORD}}"
+            - Volume 1:
+                href: https://leviathan.homelab.ts.net:5001
+                description: /volume1
+                icon: synology-dsm.png
+                widget:
+                  type: diskstation
+                  url: http://10.0.0.161:5000
+                  username: "{{HOMEPAGE_VAR_DISKSTATION_USERNAME}}"
+                  password: "{{HOMEPAGE_VAR_DISKSTATION_PASSWORD}}"
+                  volume: volume_1
+            - Volume 2:
+                href: https://leviathan.homelab.ts.net:5001
+                description: /volume2
+                icon: synology-dsm.png
+                widget:
+                  type: diskstation
+                  url: http://10.0.0.161:5000
+                  username: "{{HOMEPAGE_VAR_DISKSTATION_USERNAME}}"
+                  password: "{{HOMEPAGE_VAR_DISKSTATION_PASSWORD}}"
+                  volume: volume_2
+            - Volume 3:
+                href: https://leviathan.homelab.ts.net:5001
+                description: /volume3
+                icon: synology-dsm.png
+                widget:
+                  type: diskstation
+                  url: http://10.0.0.161:5000
+                  username: "{{HOMEPAGE_VAR_DISKSTATION_USERNAME}}"
+                  password: "{{HOMEPAGE_VAR_DISKSTATION_PASSWORD}}"
+                  volume: volume_3
+        - Network & Security:
+            - Keycloak:
+                href: https://keycloak.homelab.ts.net
+                description: Identity & access management
+                icon: keycloak.png
+            - node-02:
+                href: https://login.tailscale.com/admin/machines
+                description: Tailscale node status
+                icon: tailscale.png
+                widget:
+                  type: tailscale
+                  deviceid: nQ4hiQeWyQ11CNTRL
+                  key: "{{HOMEPAGE_VAR_TAILSCALE_API_KEY}}"
+            - node-03:
+                href: https://login.tailscale.com/admin/machines
+                description: Tailscale node status
+                icon: tailscale.png
+                widget:
+                  type: tailscale
+                  deviceid: nmJrbFFMy711CNTRL
+                  key: "{{HOMEPAGE_VAR_TAILSCALE_API_KEY}}"
+            - node-04:
+                href: https://login.tailscale.com/admin/machines
+                description: Tailscale node status
+                icon: tailscale.png
+                widget:
+                  type: tailscale
+                  deviceid: nEZoZPDcph11CNTRL
+                  key: "{{HOMEPAGE_VAR_TAILSCALE_API_KEY}}"
+            - node-01:
+                href: https://login.tailscale.com/admin/machines
+                description: Tailscale node status
+                icon: tailscale.png
+                widget:
+                  type: tailscale
+                  deviceid: nMVbx9Q6BM11CNTRL
+                  key: "{{HOMEPAGE_VAR_TAILSCALE_API_KEY}}"
+            - node-05:
+                href: https://login.tailscale.com/admin/machines
+                description: Tailscale node status
+                icon: tailscale.png
+                widget:
+                  type: tailscale
+                  deviceid: nx2FtWxx1A11CNTRL
+                  key: "{{HOMEPAGE_VAR_TAILSCALE_API_KEY}}"
+        - Monitoring:
+            - Grafana:
+                href: https://grafana.homelab.ts.net
+                description: Dashboards & observability
+                icon: grafana.png
+                widget:
+                  type: grafana
+                  version: 2
+                  url: http://kube-prometheus-stack-grafana.monitoring.svc.cluster.local
+                  username: admin
+                  password: "{{HOMEPAGE_VAR_GRAFANA_PASSWORD}}"
+            - Prometheus:
+                href: https://grafana.homelab.ts.net/explore
+                description: Metrics & alerting
+                icon: prometheus.png
+                widget:
+                  type: prometheus
+                  url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        - Media:
+            - Plex:
+                href: https://plex.homelab.ts.net
+                description: Media server
+                icon: plex.png
+                widget:
+                  type: plex
+                  url: http://plex-plex-media-server.media.svc.cluster.local:32400
+                  key: "{{HOMEPAGE_VAR_PLEX_TOKEN}}"
+            - Calibre-web:
+                href: https://calibre-web.homelab.ts.net
+                description: Ebook library
+                icon: calibre-web.png
+                widget:
+                  type: calibreweb
+                  url: http://calibre-web.calibre-web.svc.cluster.local:8083
+                  username: admin
+                  password: "{{HOMEPAGE_VAR_CALIBRE_PASSWORD}}"
+        - Services:
+            - Wiki.js:
+                href: https://wiki.homelab.ts.net
+                description: Knowledge base
+                icon: wikijs.png
+            - Linkwarden:
+                href: https://linkwarden.homelab.ts.net
+                description: Bookmark manager
+                icon: linkwarden.png
+                widget:
+                  type: linkwarden
+                  url: http://linkwarden.linkwarden.svc.cluster.local:3000
+                  key: "{{HOMEPAGE_VAR_LINKWARDEN_TOKEN}}"
+            - Draw.io:
+                href: https://drawio.homelab.ts.net
+                description: Diagramming tool
+                icon: diagrams-net.png
+        - Dev:
+            - n8n:
+                href: https://n8n.homelab.ts.net
+                description: Workflow automation
+                icon: n8n.png
+            - Windmill:
+                href: https://windmill.homelab.ts.net
+                description: Scripts & workflow engine
+                icon: windmill.png
+            - code-server:
+                href: https://code-server.homelab.ts.net
+                description: VS Code in browser
+                icon: vscode.png
+            - JupyterLab:
+                href: https://jupyter.homelab.ts.net
+                description: Notebooks & data science
+                icon: jupyter.png
+            - Nexus:
+                href: https://nexus.homelab.ts.net
+                description: Artifact repository
+                icon: nexus.png
+            - Coder:
+                href: https://coder.homelab.ts.net
+                description: Cloud dev environments
+                icon: coder.png
+            - YouTrack:
+                href: https://youtrack.homelab.ts.net
+                description: Issue tracking
+                icon: si-youtrack
+            - GitLab:
+                href: https://gitlab.homelab.ts.net
+                description: Self-hosted Git forge
+                icon: gitlab.png
+                widget:
+                  type: gitlab
+                  url: http://gitlab.gitlab.svc.cluster.local
+                  key: "{{HOMEPAGE_VAR_GITLAB_TOKEN}}"
+                  user_id: 1
+            - TeamCity:
+                href: https://teamcity.homelab.ts.net
+                description: CI/CD with 3 build agents
+                icon: teamcity.png
+      widgets:
+        - kubernetes:
+            cluster:
+              show: true
+              cpu: true
+              memory: true
+              showLabel: true
+              label: "homelab"
+            nodes:
+              show: true
+              cpu: true
+              memory: true
+        - longhorn:
+            expanded: true
+            total: true
+        - search:
+            provider: duckduckgo
+            target: _blank
+    persistence:
+      logs:
+        enabled: true
+        type: emptyDir
+        mountPath: /app/config/logs
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi

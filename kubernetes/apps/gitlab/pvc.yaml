@@ -1,0 +1,44 @@
+# GitLab CE persistent volumes
+#
+# config: /etc/gitlab (gitlab.rb, secrets)
+# data: /var/opt/gitlab (repos, uploads, LFS, registry, DB)
+# logs: /var/log/gitlab (can be ephemeral, but useful for debugging)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitlab-config
+  namespace: gitlab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitlab-data
+  namespace: gitlab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitlab-logs
+  namespace: gitlab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-kubernetes
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: windmill-tailscale
+  namespace: windmill
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: windmill-app
+      port:
+        number: 8000
+  tls:
+    - hosts:
+        - windmill

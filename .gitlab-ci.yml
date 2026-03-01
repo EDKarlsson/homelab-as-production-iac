@@ -1,0 +1,205 @@
+# GitLab CI — homelab-iac validation pipeline
+#
+# Mirrors the GitHub Actions ci-testing.yml validation suite.
+# Runs on pushes to main and merge requests targeting main.
+#
+# Stages run in order; jobs within a stage run in parallel.
+# Path filtering uses GitLab's native 'changes:' rules so only relevant
+# jobs run when their files change — same behaviour as dorny/paths-filter.
+#
+# Required GitLab CI/CD variables (Settings → CI/CD → Variables):
+#   NEXUS_URL          — https://nexus.homelab.ts.net (or LAN URL)
+#   NEXUS_CI_USERNAME  — Nexus user with write access to raw-ci-hosted
+#   NEXUS_CI_PASSWORD  — (masked) Nexus password
+#   NEXUS_RAW_REPO     — raw-ci-hosted (optional override)
+
+stages:
+  - validate
+  - publish
+  - smoke
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ─── Validate stage ──────────────────────────────────────────────────────────
+
+terraform:
+  stage: validate
+  image: hashicorp/terraform:latest
+  before_script:
+    - apk add --no-cache curl bash gcompat  # gcompat: glibc compat layer for musl (needed by 1Password provider)
+    - |
+      # Install TFLint
+      curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+  script:
+    - terraform fmt -check -recursive infrastructure
+    - |
+      set -euo pipefail
+      for dir in $(find infrastructure -name '*.tf' -exec dirname {} \; | sort -u); do
+        echo "==> terraform init/validate in ${dir}"
+        terraform -chdir="${dir}" init -backend=false -input=false -no-color
+        terraform -chdir="${dir}" validate -no-color
+        tflint --chdir "${dir}" --init
+        tflint --chdir "${dir}"
+      done
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "infrastructure/**/*.tf"
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "infrastructure/**/*.tf"
+
+ansible:
+  stage: validate
+  image: python:3.13-slim
+  before_script:
+    - pip install --quiet ansible-core ansible-lint
+    - ansible-galaxy collection install ansible.posix community.general artis3n.tailscale onepassword.connect community.postgresql
+  script:
+    - ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/k3s-cluster.yml --syntax-check
+    - ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/k3s-upgrade.yml --syntax-check -e k3s_version=v1.32.12+k3s1
+    - ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/pg-backup.yml --syntax-check
+    - ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/k3s-registry-mirrors.yml --syntax-check -e nexus_registry_mirror_url=localhost:8081
+    - ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/pg-create-db.yml --syntax-check -e db_name=test -e db_user=test -e db_password=test
+    - ansible-playbook -i ansible/inventory/k3s.yml ansible/playbooks/gitlab-runner-shell.yml --syntax-check -e gitlab_runner_token=glrt-dummy
+    - ansible-lint ansible/playbooks ansible/templates
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "ansible/**/*.yml"
+        - "ansible/**/*.yaml"
+        - "ansible/**/*.j2"
+        - "ansible.cfg"
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "ansible/**/*.yml"
+        - "ansible/**/*.yaml"
+        - "ansible/**/*.j2"
+        - "ansible.cfg"
+
+kubernetes:
+  stage: validate
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl wget bash
+    - |
+      # kustomize
+      curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+      mv kustomize /usr/local/bin/
+      # yq
+      wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v4.44.5/yq_linux_amd64"
+      chmod +x /usr/local/bin/yq
+      # kubeconform
+      curl -sSL "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz" | tar xz -C /usr/local/bin
+      chmod +x /usr/local/bin/kubeconform
+  script:
+    - bash scripts/k8s/validate.sh
+    - bash scripts/ci/policy-check.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "clusters/**/*.yaml"
+        - "clusters/**/*.yml"
+        - "kubernetes/**/*.yaml"
+        - "kubernetes/**/*.yml"
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "clusters/**/*.yaml"
+        - "clusters/**/*.yml"
+        - "kubernetes/**/*.yaml"
+        - "kubernetes/**/*.yml"
+
+shellcheck:
+  stage: validate
+  image: koalaman/shellcheck-alpine:stable
+  script:
+    - |
+      set -euo pipefail
+      # Find all shell scripts, excluding _archive/ (deprecated scripts not maintained)
+      find scripts -name '*.sh' -not -path 'scripts/_archive/*' -print0 | xargs -0 shellcheck -x
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "scripts/**/*.sh"
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "scripts/**/*.sh"
+
+# ─── Publish stage ───────────────────────────────────────────────────────────
+
+publish-nexus:
+  stage: publish
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl bash git
+  script:
+    - |
+      set -euo pipefail
+      # Job pods can't resolve Tailscale MagicDNS — use internal K8s service URL.
+      # Overrides the instance-level NEXUS_URL variable (which uses the Tailscale hostname).
+      export NEXUS_URL="http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081"
+      # Derive version from commit context
+      if [ -n "${CI_MERGE_REQUEST_IID:-}" ]; then
+        VERSION="mr-${CI_MERGE_REQUEST_IID}-${CI_COMMIT_SHORT_SHA}"
+      else
+        VERSION="main-${CI_COMMIT_SHORT_SHA}"
+      fi
+      export ARTIFACT_VERSION="${VERSION}"
+      export GIT_REF="${CI_COMMIT_REF_NAME}"
+
+      bash scripts/ci/build-artifacts.sh dist/ci-artifacts
+
+      # Publish if Nexus credentials configured
+      if [ -n "${NEXUS_URL:-}" ] && [ -n "${NEXUS_CI_USERNAME:-}" ] && [ -n "${NEXUS_CI_PASSWORD:-}" ]; then
+        for f in dist/ci-artifacts/*.tar.gz dist/ci-artifacts/*.json; do
+          [ -f "$f" ] || continue
+          bash scripts/ci/publish-nexus-raw.sh \
+            "homelab-iac/ci-bundles/${ARTIFACT_VERSION}" \
+            "$f"
+        done
+        echo "✓ Published to Nexus: homelab-iac/ci-bundles/${ARTIFACT_VERSION}"
+      else
+        echo "Nexus credentials not configured — skipping publish"
+      fi
+  artifacts:
+    paths:
+      - dist/ci-artifacts/
+    expire_in: 14 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+sbom:
+  stage: publish
+  tags:
+    - homelab   # needs a shell runner inside the homelab network (see ansible/playbooks/gitlab-runner-shell.yml)
+  script:
+    # DT_URL: use the nip.io ingress — accessible on LAN and trusted via homelab CA
+    # (the gitlab-runner-shell playbook installs the homelab CA into the system trust store).
+    # Overrides the DT_URL default (https://dependency-track.homelab.ts.net) to avoid
+    # Tailscale dependency on the runner host.
+    - export DT_URL="https://dependency-track.10.0.0.201.nip.io"
+    - bash scripts/ci/generate-sbom.sh dist/sbom
+  artifacts:
+    paths:
+      - dist/sbom/
+    expire_in: 14 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual   # optional security scan; requires live homelab cluster + Dependency-Track
+  allow_failure: true   # Don't block the pipeline if DT is temporarily unreachable
+
+# ─── Smoke stage ─────────────────────────────────────────────────────────────
+
+homelab-smoke:
+  stage: smoke
+  tags:
+    - homelab   # must match the tag on a registered self-hosted GitLab runner
+  script:
+    - bash scripts/ci/homelab-smoke.sh
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual   # run manually from GitLab pipeline UI; promote to 'on_success' when runner is stable
+  allow_failure: true

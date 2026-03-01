@@ -1,0 +1,86 @@
+# TeamCity Build Agents — 3 static replicas
+#
+# Agents auto-register with the server via SERVER_URL on startup.
+# On first boot, each agent appears in TeamCity UI under "Unauthorized Agents".
+# Authorize each agent once — the auth token persists in the agent-conf PVC.
+#
+# Image version MUST match the server version to avoid compatibility issues.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: teamcity-agent
+  namespace: teamcity
+  labels:
+    app.kubernetes.io/name: teamcity-agent
+spec:
+  serviceName: teamcity-agent
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: teamcity-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teamcity-agent
+    spec:
+      containers:
+        - name: teamcity-agent
+          image: jetbrains/teamcity-agent:2025.11.2
+          env:
+            - name: SERVER_URL
+              value: "http://teamcity-server.teamcity.svc.cluster.local:8111"
+            # Package manager proxies — route all dependency fetches through Nexus.
+            # Uses in-cluster DNS so traffic stays within the cluster.
+            # Nexus internal URL: http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081
+            - name: npm_config_registry
+              value: "http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/npm-proxy/"
+            - name: PIP_INDEX_URL
+              value: "http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/pypi-proxy/simple/"
+            - name: PIP_TRUSTED_HOST
+              value: "nexus-nexus-repository-manager.nexus.svc.cluster.local"
+            - name: UV_INDEX_URL
+              value: "http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/pypi-proxy/simple/"
+            - name: GOPROXY
+              value: "http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/go-proxy/,direct"
+            # Cargo (Rust) — no env var support; requires config.toml in CARGO_HOME.
+            # config.toml is mounted from the cargo-config ConfigMap.
+            - name: CARGO_HOME
+              value: "/opt/cargo"
+          volumeMounts:
+            - name: agent-conf
+              mountPath: /data/teamcity_agent/conf
+            - name: agent-work
+              mountPath: /opt/buildagent/work
+            - name: cargo-config
+              mountPath: /opt/cargo/config.toml
+              subPath: config.toml
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+      volumes:
+        - name: cargo-config
+          configMap:
+            name: cargo-config
+  volumeClaimTemplates:
+    - metadata:
+        name: agent-conf
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: nfs-kubernetes
+        resources:
+          requests:
+            storage: 1Gi
+    - metadata:
+        name: agent-work
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: nfs-kubernetes
+        resources:
+          requests:
+            storage: 10Gi

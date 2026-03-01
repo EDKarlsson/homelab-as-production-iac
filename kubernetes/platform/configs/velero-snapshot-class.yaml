@@ -1,0 +1,16 @@
+---
+# VolumeSnapshotClass for Longhorn CSI — used by Velero for PVC snapshots
+# The velero.io label enables auto-discovery: Velero will use this class
+# for all PVCs backed by the driver.longhorn.io CSI driver.
+# type=snap creates in-cluster COW snapshots (near-instant); Velero's
+# data mover then uploads the data to the BackupStorageLocation (MinIO).
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: longhorn-snapshot-vsc
+  labels:
+    velero.io/csi-volumesnapshot-class: "true"
+driver: driver.longhorn.io
+deletionPolicy: Delete
+parameters:
+  type: snap

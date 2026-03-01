@@ -1,0 +1,40 @@
+# A list of managed nodes provided by one or more ‘inventory sources’. Your 
+#   inventory can specify information specific to each node, like IP address.
+#   It is also used for assigning groups, that both allow for node selection 
+#   in the Play and bulk variable assignment.
+    
+# Bare Metal Proxmox VE Hosts
+proxmox:
+  hosts:
+    node-02:
+      ansible_host: 10.0.0.10
+    node-03:
+      ansible_host: 10.0.0.11
+    node-04:
+      ansible_host: 10.0.0.12
+    node-01:
+      ansible_host: 10.0.0.13
+    node-05:
+      ansible_host: 10.0.0.14
+  vars:
+    ansible_user: root
+    ansible_connection: ssh
+    ansible_private_key_file: ~/.ssh/homelab/pve/root_ed25519
+
+# Homelab Synology NAS
+nas:
+  hosts:
+    leviathan:
+      ansible_host: 10.0.0.161
+  vars:
+    ansible_user: starforger
+    ansible_connection: ssh
+    ansible_private_key_file: ~/.ssh/homelab/nas/starforger_ed25519
+
+# monitoring:
+#   hosts:
+#     monitoringserver:
+#     snort:
+#   vars:
+#     ansible_connection: ssh
+#     ansible_private_key_file: ~/.ssh/homelab/monitoring/monitoring_ed25519

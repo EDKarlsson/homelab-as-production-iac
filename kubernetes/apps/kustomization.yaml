@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./podinfo
+  - ./plex
+  - ./homepage
+  - ./code-server
+  - ./n8n
+  - ./nexus
+  - ./jupyterlab
+  # - ./docmost  # removed — replaced by Wiki.js
+  - ./wikijs
+  - ./youtrack
+  - ./teamcity
+  - ./coder
+  - ./windmill
+  - ./drawio
+  - ./calibre-web
+  - ./linkwarden
+  - ./gitlab
+  - ./affine
+  - ./dependency-track
+  - ./gitlab-runner
+patches:
+  - path: podinfo-values.yaml
+    target:
+      kind: HelmRelease
+      name: podinfo
+  - path: plex-values.yaml
+    target:
+      kind: HelmRelease
+      name: plex

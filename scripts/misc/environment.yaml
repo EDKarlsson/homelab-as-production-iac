@@ -1,0 +1,59 @@
+op:
+  vaults:
+    # 1Pass Base
+    HOMELAB: YOUR_HOMELAB_VAULT_ID
+    DEV: YOUR_DEV_VAULT_ID
+  cli: none # $(which op | echo /usr/local/bin/op)
+  items:
+    service_acct: YOUR_SERVICE_ACCOUNT_ITEM_UUID
+    connect_host: op://Homelab/YOUR_CONNECT_ITEM_UUID/hostname
+    connect_token: YOUR_CONNECT_ITEM_UUID
+    proxmox:
+      # 1Pass Proxmox CREDENTIAL ITEMS
+      tf: YOUR_PROXMOX_TF_ITEM_UUID
+      ssh: YOUR_PROXMOX_SSH_ITEM_UUID
+    # 1Pass LLMs
+    llm:
+      anthropic: YOUR_ANTHROPIC_ITEM_UUID
+      claudE: YOUR_CLAUDE_ITEM_UUID
+      google: YOUR_GOOGLE_ITEM_UUID
+      perplexity: YOUR_PERPLEXITY_ITEM_UUID
+    mcp:
+      # 1Pass MCP Servers
+      context7: YOUR_CONTEXT7_ITEM_UUID
+      todoist: YOUR_TODOIST_ITEM_UUID
+vars:
+  - OP_SERVICE_ACCOUNT_TOKEN: op://$OP_VAULT_HOMELAB/$OP_SERVICE_ACCT/credential
+  - OP_CONNECT_TOKEN: op://$OP_VAULT_HOMELAB/$OP_CONNECT/credential
+  - OP_CONNECT_HOST: op://$OP_VAULT_HOMELAB/$OP_CONNECT/hostname
+
+  - ANSIBLE_CONFIG: None # $(realpath $(find . -name ansible.cfg) | head -n 1)
+
+  # AI Models API Keys (Required to enable respective provider)
+  - ANTHROPIC_API_KEY: op://$OP_VAULT_DEV/$OP_LLM_ANTHROPIC/credentials/api_key
+  - CLAUDE_CODE_AUTH_KEY: op://$OP_VAULT_DEV/$OP_LLM_CLAUDE/credentials/oauth_token
+  - GOOGLE_API_KEY: op://$OP_VAULT_DEV/$OP_LLM_GOOGLE/credentials/api_key
+  - PERPLEXITY_API_KEY: op://$OP_VAULT_DEV/$OP_LLM_PERPLEXITY/credentials/api_key
+
+  # MCP Server API Keys
+  - CONTEXT7_API_KEY: op://$OP_VAULT_DEV/$OP_MCP_CONTEXT7/credentials/api_key
+  - TODOIST_API_KEY: op://$OP_VAULT_DEV/$OP_MCP_TODOIST/credentials/api_key
+
+  # Proxmox API Access Variables
+  - PROXMOX_VE_ENDPOINT: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_TF/credentials/endpoint
+  - PROXMOX_VE_USERNAME: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_TF/credentials/id
+  - PROXMOX_VE_API_TOKEN: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_TF/credentials/token
+  - PROXMOX_VE_PASSWORD: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_TF/password
+
+  # Proxmox SSH Access Variables
+  - PROXMOX_VE_SSH_USERNAME: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_SSH/credentials/username
+  - PROXMOX_VE_SSH_PASSWORD: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_SSH/credentials/password
+  - PROXMOX_VE_SSH_PRIVATE_KEY: op://$OP_VAULT_HOMELAB/$OP_PROXMOX_SSH/private key?ssh-format=openssh
+
+  # Terraform Proxmox Provider Variables
+  - TF_VAR_proxmox_ve_endpoint: $PROXMOX_VE_ENDPOINT
+  - TF_VAR_proxmox_ve_username: $PROXMOX_VE_USERNAME
+  - TF_VAR_proxmox_ve_token: $PROXMOX_VE_API_TOKEN
+  - TF_VAR_proxmox_ve_node_name: $PROXMOX_VE_NODE_NAME:-pve-node
+  - TF_VAR_proxmox_ve_datastore_id: $PROXMOX_VE_DATASTORE_ID:-local-lvm
+

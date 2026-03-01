@@ -1,0 +1,25 @@
+# Flux Alert — sends error events to Slack immediately
+#
+# Covers all Flux resource types. Only error severity to avoid noise
+# from 20+ HelmReleases reconciling hourly. Info-level alerts can be
+# added later with inclusionList filters.
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: flux-errors-slack
+  namespace: flux-system
+spec:
+  providerRef:
+    name: slack
+  eventSeverity: error
+  eventSources:
+    - kind: Kustomization
+      name: "*"
+    - kind: HelmRelease
+      name: "*"
+    - kind: HelmRepository
+      name: "*"
+    - kind: GitRepository
+      name: "*"
+    - kind: HelmChart
+      name: "*"

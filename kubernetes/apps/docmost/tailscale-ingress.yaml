@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: docmost-tailscale
+  namespace: docmost
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: docmost
+      port:
+        number: 3000
+  tls:
+    - hosts:
+        - docmost

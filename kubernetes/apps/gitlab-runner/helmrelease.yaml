@@ -1,0 +1,52 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: gitlab-runner
+  namespace: gitlab-runner
+spec:
+  interval: 30m
+  install:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: gitlab-runner
+      version: "0.86.0"
+      sourceRef:
+        kind: HelmRepository
+        name: gitlab
+        namespace: gitlab-runner
+      interval: 12h
+  values:
+    # GitLab instance URL reachable from inside the cluster
+    gitlabUrl: http://gitlab.gitlab.svc.cluster.local
+
+    # runner-token sourced from ExternalSecret; chart also requires the legacy
+    # runner-registration-token key in the same secret (empty string is fine).
+    runners:
+      secret: gitlab-runner-token
+      config: |
+        [[runners]]
+          # Job pods can't resolve Tailscale MagicDNS (gitlab.homelab.ts.net).
+          # clone_url overrides the URL used for git clone in job pods.
+          clone_url = "http://gitlab.gitlab.svc.cluster.local"
+          [runners.kubernetes]
+            namespace = "{{.Release.Namespace}}"
+            image = "ubuntu:24.04"
+            pull_policy = ["if-not-present", "always"]
+            cpu_request = "100m"
+            cpu_limit = "1"
+            memory_request = "128Mi"
+            memory_limit = "1Gi"
+
+    # RBAC: let the runner create/delete job pods in its namespace
+    rbac:
+      create: true
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi

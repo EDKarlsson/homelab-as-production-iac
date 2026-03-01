@@ -1,0 +1,28 @@
+# CoreDNS custom override — resolve Tailscale hostnames for in-cluster pods
+#
+# Problem: pods cannot resolve *.ts.net (Tailscale MagicDNS) via CoreDNS.
+# This means services like OAuth2 Proxy cannot contact Keycloak at its
+# Tailscale URL for OIDC discovery.
+#
+# Solution: rewrite specific hostnames to their nip.io equivalents, which
+# public DNS resolves to the MetalLB IP (10.0.0.201). nginx routes the
+# request using the ORIGINAL hostname in the Host header (which we preserve
+# by adding the hostname as an ingress rule in keycloak.yaml).
+#
+# NOTE: Cannot use the 'hosts' plugin here — K3s CoreDNS already uses it
+# for NodeHosts and CoreDNS only allows one 'hosts' block per server.
+# The 'rewrite' plugin has no such restriction.
+#
+# External browsers are unaffected — they resolve keycloak.homelab.ts.net
+# via Tailscale MagicDNS to the Tailscale IP, which serves a real LE cert.
+#
+# K3s CoreDNS Corefile contains: import /etc/coredns/custom/*.override
+# This ConfigMap is auto-mounted at /etc/coredns/custom/ as "homelab-ts.override"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  homelab-ts.override: |
+    rewrite name keycloak.homelab.ts.net keycloak.10.0.0.201.nip.io

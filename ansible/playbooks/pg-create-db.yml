@@ -1,0 +1,67 @@
+---
+# PostgreSQL Database Bootstrap Playbook
+# Creates a new database + user on the HA cluster (primary + standby pg_hba).
+#
+# Usage:
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/pg-create-db.yml \
+#     -e db_name=dependencytrack \
+#     -e db_user=dependencytrack \
+#     -e db_password='<password>' \
+#     --forks=1
+#
+# The playbook is idempotent — safe to re-run.
+
+- name: "Create PostgreSQL database and user"
+  hosts: pg_nodes
+  become: true
+  vars:
+    db_name: "{{ db_name }}"
+    db_user: "{{ db_user }}"
+    db_password: "{{ db_password }}"
+  tasks:
+    - name: Create PostgreSQL user
+      community.postgresql.postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        state: present
+      become: true
+      become_user: postgres
+      when: inventory_hostname == groups['pg_nodes'][0]
+
+    - name: Create PostgreSQL database
+      community.postgresql.postgresql_db:
+        name: "{{ db_name }}"
+        owner: "{{ db_user }}"
+        state: present
+      become: true
+      become_user: postgres
+      when: inventory_hostname == groups['pg_nodes'][0]
+
+    - name: Grant all privileges on database
+      community.postgresql.postgresql_privs:
+        db: "{{ db_name }}"
+        roles: "{{ db_user }}"
+        type: database
+        privs: ALL
+        state: present
+      become: true
+      become_user: postgres
+      when: inventory_hostname == groups['pg_nodes'][0]
+
+    - name: Add pg_hba entry on this node
+      community.postgresql.postgresql_pg_hba:
+        dest: /etc/postgresql/16/main/pg_hba.conf
+        contype: host
+        users: "{{ db_user }}"
+        source: 10.0.0.0/24
+        databases: "{{ db_name }}"
+        method: scram-sha-256
+        state: present
+      notify: Reload PostgreSQL
+
+  handlers:
+    - name: Reload PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: reloaded

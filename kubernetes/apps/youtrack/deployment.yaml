@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: youtrack
+  namespace: youtrack
+  labels:
+    app.kubernetes.io/name: youtrack
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: youtrack
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: youtrack
+    spec:
+      securityContext:
+        runAsUser: 13001
+        runAsGroup: 13001
+        fsGroup: 13001
+      containers:
+        - name: youtrack
+          image: jetbrains/youtrack:2025.3.124603
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /opt/youtrack/data
+            - name: conf
+              mountPath: /opt/youtrack/conf
+            - name: logs
+              mountPath: /opt/youtrack/logs
+            - name: backups
+              mountPath: /opt/youtrack/backups
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: youtrack-data
+        - name: conf
+          persistentVolumeClaim:
+            claimName: youtrack-conf
+        - name: logs
+          persistentVolumeClaim:
+            claimName: youtrack-logs
+        - name: backups
+          persistentVolumeClaim:
+            claimName: youtrack-backups

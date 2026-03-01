@@ -1,0 +1,46 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: windmill
+  namespace: windmill
+spec:
+  interval: 50m
+  install:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: windmill
+      version: "2.x"
+      sourceRef:
+        kind: HelmRepository
+        name: windmill
+        namespace: windmill
+      interval: 12h
+  values:
+    windmill:
+      tag: "1.639.0"
+      databaseUrlSecretName: windmill-secrets
+      baseDomain: windmill.homelab.ts.net
+      baseProtocol: https
+      appReplicas: 1
+    postgresql:
+      enabled: false
+    windmill_extra:
+      replicas: 1
+    indexer:
+      replicas: 1
+      resources:
+        limits:
+          ephemeral-storage: 10Gi
+    workerGroups:
+      - name: "default"
+        replicas: 2
+        resources:
+          limits:
+            memory: "1Gi"
+      - name: "native"
+        replicas: 1
+        resources:
+          limits:
+            memory: "1Gi"

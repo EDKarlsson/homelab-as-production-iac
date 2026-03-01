@@ -1,0 +1,42 @@
+# Shared variables for the Asgard K3s Cluster
+# Applied to all hosts in k3s_cluster group (servers, agents, db)
+
+# K3s version — update this for each upgrade hop
+k3s_version: "v1.32.12+k3s1"
+
+# First server node acts as the API entry point for agents
+k3s_server_url: "https://10.0.0.50:6443"
+
+# PostgreSQL datastore connection
+k3s_datastore_endpoint: "postgres://k3s:{{ postgres_password }}@10.0.0.44:5432/k3s"
+
+# Networking (must match cloud-init values on existing nodes)
+k3s_cluster_cidr: "10.42.0.0/16"
+k3s_service_cidr: "10.43.0.0/16"
+k3s_cluster_dns: "10.43.0.10"
+
+# Disabled built-in components
+k3s_disable:
+  - traefik
+
+# Nexus proxy — LoadBalancer IP for unauthenticated access (kubernetes/apps/nexus/service-lb.yaml)
+# HTTP intentional: cannot use ingress-nginx (OAuth2 Proxy); containerd/apt run outside cluster.
+nexus_apt_url: "http://10.0.0.202:8081"
+# Used by k3s-registry-mirrors.yml — path-based Docker v2 API access via containerd mirror config.
+# Containerd on K3s nodes accesses this directly (host network, not pod network).
+nexus_registry_mirror_url: "10.0.0.202:8081"
+
+# Secrets — fetched at runtime from 1Password via op CLI (community.general.onepassword lookup).
+# Requires: op CLI in PATH + 1Password desktop app running for biometric auth.
+# 1Password item: "homelab-k3s-cluster" in Homelab vault
+#   section "cluster"  → field "server-token"  → k3s_cluster_token
+#   section "database" → field "password"       → postgres_password
+#
+# To run without 1Password (e.g. first bootstrap before op is configured):
+#   ansible-playbook ... -e k3s_cluster_token=<token> -e postgres_password=<pass>
+k3s_cluster_token: >-
+  {{ lookup('community.general.onepassword', 'homelab-k3s-cluster',
+     field='server-token', section='cluster', vault='Homelab') }}
+postgres_password: >-
+  {{ lookup('community.general.onepassword', 'homelab-k3s-cluster',
+     field='password', section='database', vault='Homelab') }}

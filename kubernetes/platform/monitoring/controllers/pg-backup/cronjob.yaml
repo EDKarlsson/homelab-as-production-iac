@@ -1,0 +1,101 @@
+# CronJob — nightly PostgreSQL backup via pg_dumpall (Tier 1)
+#
+# Backs up ALL databases (pg_dumpall captures every database on the cluster)
+# Currently: k3s, terraform_state, keycloak, n8n, wikijs, teamcity, coder, windmill
+# Stored on NFS at /backups/postgresql/<date>.sql.gz
+# Retains last 14 days of backups (older are pruned automatically)
+# Monitoring: PGBackupJobFailed + PGBackupMissing alerts in homelab-alerts.yaml
+#
+# Schedule: 2:00 AM Pacific daily
+#
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: pg-backup
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "0 10 * * *"  # 2:00 AM Pacific (UTC-8) = 10:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: pg-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pg-backup
+              image: postgres:16-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  BACKUP_DIR="/backups/postgresql"
+                  DATE=$(date +%Y-%m-%d_%H%M%S)
+                  BACKUP_FILE="${BACKUP_DIR}/${DATE}.sql.gz"
+
+                  mkdir -p "${BACKUP_DIR}"
+
+                  # Set up .pgpass for password-less auth
+                  cp /etc/pgpass/.pgpass /tmp/.pgpass
+                  chmod 600 /tmp/.pgpass
+                  export PGPASSFILE=/tmp/.pgpass
+
+                  echo "Starting pg_dumpall at $(date)"
+                  pg_dumpall \
+                    -h "${PG_HOST}" \
+                    -U "${PG_USER}" \
+                    --clean \
+                    --if-exists \
+                    | gzip > "${BACKUP_FILE}"
+
+                  FILESIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+                  echo "Backup complete: ${BACKUP_FILE} (${FILESIZE})"
+
+                  # Prune backups older than 14 days
+                  find "${BACKUP_DIR}" -name "*.sql.gz" -mtime +14 -delete
+                  REMAINING=$(ls "${BACKUP_DIR}"/*.sql.gz 2>/dev/null | wc -l)
+                  echo "Pruned old backups. ${REMAINING} backups retained."
+              env:
+                - name: PG_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: pg-backup-credentials
+                      key: pg-host
+                - name: PG_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: pg-backup-credentials
+                      key: pg-user
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: pgpass
+                  mountPath: /etc/pgpass
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: pg-backups
+            - name: pgpass
+              secret:
+                secretName: pg-backup-credentials
+                items:
+                  - key: pgpass
+                    path: .pgpass

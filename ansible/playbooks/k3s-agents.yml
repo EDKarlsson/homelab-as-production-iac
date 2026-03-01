@@ -1,0 +1,116 @@
+---
+# K3s Agent (Worker Node) Provisioning
+# Installs K3s agent on all worker nodes and joins them to the cluster.
+#
+# Usage:
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/k3s-agents.yml
+#
+# Prerequisites: K3s servers must be running (run k3s-servers.yml first).
+
+- name: Provision K3s agent nodes
+  hosts: k3s_agents
+  become: true
+  tasks:
+    - name: Disable swap
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Remove swap from fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '\sswap\s'
+        state: absent
+
+    - name: Load kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - ip_vs
+        - ip_vs_rr
+        - ip_vs_wrr
+        - ip_vs_sh
+        - nf_conntrack
+
+    - name: Persist kernel modules across reboots
+      ansible.builtin.copy:
+        content: |
+          br_netfilter
+          ip_vs
+          ip_vs_rr
+          ip_vs_wrr
+          ip_vs_sh
+          nf_conntrack
+        dest: /etc/modules-load.d/k3s.conf
+        mode: "0644"
+
+    - name: Configure sysctl for Kubernetes networking
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/k3s.conf
+        reload: true
+      loop:
+        - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+        - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+        - { key: "net.ipv4.ip_forward", value: "1" }
+
+    - name: Create K3s config directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: "0755"
+
+    - name: Template K3s agent config
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/templates/k3s-agent-config.yaml.j2"
+        dest: /etc/rancher/k3s/config.yaml
+        mode: "0600"
+
+    - name: Wait for K3s server API to be reachable
+      ansible.builtin.uri:
+        url: "{{ k3s_server_url }}/readyz"
+        validate_certs: false
+        status_code: [200, 401, 403]
+      register: server_check
+      until: server_check.status in [200, 401, 403]
+      retries: 30
+      delay: 10
+
+    - name: Download K3s installer
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: "0755"
+
+    - name: Install K3s agent
+      ansible.builtin.shell: |
+        INSTALL_K3S_VERSION={{ k3s_version }} K3S_URL={{ k3s_server_url }} K3S_TOKEN={{ k3s_cluster_token }} /tmp/k3s-install.sh agent
+      args:
+        creates: /usr/local/bin/k3s
+      no_log: true
+
+    - name: Wait for K3s agent service to be active
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: started
+        enabled: true
+      register: k3s_agent_service
+      until: k3s_agent_service is not failed
+      retries: 12
+      delay: 10
+
+- name: Verify agents joined cluster
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Show cluster nodes
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      register: cluster_nodes
+      changed_when: false
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        msg: "{{ cluster_nodes.stdout_lines }}"

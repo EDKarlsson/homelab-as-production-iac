@@ -1,0 +1,135 @@
+---
+# PostgreSQL Backup Automation Playbook
+# Deploys per-database backup script, NFS mount, and cron to both PG HA nodes.
+#
+# The backup script has a VIP guard — both nodes get the cron, but only
+# the current VIP holder (primary) executes. After failover, the promoted
+# standby automatically starts backing up on the next cron cycle.
+#
+# Prerequisites:
+#   - Synology NAS share /volume1/postgresql-backups exists with NFS access
+#     for 10.0.0.45 and 10.0.0.46
+#
+# Usage:
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/pg-backup.yml --forks=1
+
+- name: "Deploy PostgreSQL backup automation"
+  hosts: pg_nodes
+  become: true
+  tasks:
+    # ── NFS mount for NAS backups ──────────────────────────────────────
+    - name: Install nfs-common for NAS mount
+      ansible.builtin.apt:
+        name: nfs-common
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Unmount stale NFS if present
+      ansible.builtin.command: umount -l {{ pg_backup_nas_mount }}
+      failed_when: false
+      changed_when: false
+
+    - name: Create NAS backup mount point
+      ansible.builtin.file:
+        path: "{{ pg_backup_nas_mount }}"
+        state: directory
+        mode: "0755"
+
+    - name: Add NFS fstab entry
+      ansible.posix.mount:
+        src: "{{ pg_backup_nas_server }}:{{ pg_backup_nas_path }}"
+        path: "{{ pg_backup_nas_mount }}"
+        fstype: nfs
+        opts: "defaults,nofail,soft,timeo=30,retrans=3"
+        state: present
+
+    - name: Attempt NFS mount
+      ansible.posix.mount:
+        src: "{{ pg_backup_nas_server }}:{{ pg_backup_nas_path }}"
+        path: "{{ pg_backup_nas_mount }}"
+        fstype: nfs
+        opts: "defaults,nofail,soft,timeo=30,retrans=3"
+        state: mounted
+      register: nfs_mount_result
+      failed_when: false
+
+    # ── Backup script ──────────────────────────────────────────────────
+    - name: Create local backup directory
+      ansible.builtin.file:
+        path: "{{ pg_backup_local_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Deploy backup script
+      ansible.builtin.template:
+        src: "{{ playbook_dir | dirname }}/templates/backup-pg-dbs.sh.j2"
+        dest: /usr/local/bin/backup-pg-dbs.sh
+        mode: "0755"
+
+    # ── Cron and logrotate ─────────────────────────────────────────────
+    - name: Deploy backup cron entry
+      ansible.builtin.copy:
+        dest: /etc/cron.d/pg-backup
+        mode: "0644"
+        content: |
+          # PostgreSQL per-database backup (Tier 2)
+          # VIP guard ensures only the current primary executes
+          {{ pg_backup_cron_schedule }} root /usr/local/bin/backup-pg-dbs.sh >> /var/log/pg-backup.log 2>&1
+
+    - name: Deploy logrotate config
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/pg-backup
+        mode: "0644"
+        content: |
+          /var/log/pg-backup.log {
+            daily
+            missingok
+            rotate 30
+            compress
+            delaycompress
+            notifempty
+            copytruncate
+          }
+
+    # ── Verification ───────────────────────────────────────────────────
+    - name: Check if NAS is mounted
+      ansible.builtin.command: mountpoint -q {{ pg_backup_nas_mount }}
+      register: nas_mounted
+      changed_when: false
+      failed_when: false
+
+    - name: Display NAS mount status
+      ansible.builtin.debug:
+        msg: >-
+          NAS mount {{ pg_backup_nas_mount }}:
+          {{ 'MOUNTED' if nas_mounted.rc == 0 else 'NOT MOUNTED — create Synology share first' }}
+
+    - name: Check if this node holds the VIP
+      ansible.builtin.shell: |
+        set -o pipefail
+        ip addr show | grep -q {{ pg_backup_vip }}
+      args:
+        executable: /bin/bash
+      register: is_vip_holder
+      changed_when: false
+      failed_when: false
+
+    - name: Display VIP status
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}):
+          {{ 'VIP holder — backups will execute here' if is_vip_holder.rc == 0
+             else 'Not VIP holder — backups will skip on this node' }}
+
+    - name: Run initial backup on VIP holder
+      ansible.builtin.command: /usr/local/bin/backup-pg-dbs.sh
+      register: initial_backup
+      changed_when: true
+      when: is_vip_holder.rc == 0
+
+    - name: Display initial backup result
+      ansible.builtin.debug:
+        msg: "{{ initial_backup.stdout_lines }}"
+      when: is_vip_holder.rc == 0 and initial_backup is defined

@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+resources:
+  - podmonitor.yaml
+  - grafana-external-secret.yaml
+  - grafana-keycloak-oidc-external-secret.yaml
+  - homelab-ca-configmap.yaml
+  - homelab-alerts.yaml
+configMapGenerator:
+  - name: flux-grafana-dashboards
+    files:
+      - dashboards/control-plane.json
+      - dashboards/cluster.json
+      - dashboards/logs.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+        app.kubernetes.io/part-of: flux
+        app.kubernetes.io/component: monitoring
+        kustomize.toolkit.fluxcd.io/substitute: disabled
+  - name: homelab-grafana-dashboards
+    files:
+      - dashboards/applications.json
+      - dashboards/application-logs.json
+      - dashboards/proxmox.json
+      - dashboards/nexus.json
+      - dashboards/staging.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+        app.kubernetes.io/component: monitoring
+  - name: apps-grafana-dashboards
+    files:
+      - dashboards/n8n.json
+      - dashboards/windmill.json
+      - dashboards/teamcity.json
+      - dashboards/jupyterlab.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+        app.kubernetes.io/component: monitoring
+  - name: cicd-grafana-dashboards
+    files:
+      - dashboards/cicd-pipeline.json
+      - dashboards/gitops-health.json
+      - dashboards/gitlab.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+        app.kubernetes.io/component: monitoring

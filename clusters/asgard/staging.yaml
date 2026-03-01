@@ -1,0 +1,26 @@
+---
+# Staging environment — namespace-based overlays on the same cluster.
+# Each app under kubernetes/staging/<app>/ is a Kustomize overlay that
+# references the production base (kubernetes/apps/<app>/) and patches:
+#   - namespace name → <app>-staging
+#   - ingress hostname → <app>-staging.10.0.0.201.nip.io
+#   - any values specific to staging (reduced replicas, test config, etc.)
+#
+# This Kustomization intentionally depends on platform-configs (same as apps)
+# so all platform CRDs, issuers, and ClusterSecretStore are already present.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: staging
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  dependsOn:
+    - name: platform-configs
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/staging
+  prune: true
+  wait: true
+  timeout: 5m0s

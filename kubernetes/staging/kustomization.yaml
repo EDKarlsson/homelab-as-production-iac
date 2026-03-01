@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Add staging app overlays here as you create them, e.g.:
+#   resources:
+#     - ./podinfo
+#     - ./n8n
+resources:
+  - ./podinfo

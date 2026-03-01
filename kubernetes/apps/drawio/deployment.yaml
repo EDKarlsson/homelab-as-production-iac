@@ -1,0 +1,48 @@
+# Draw.io — browser-based diagramming tool (stateless)
+#
+# Image: jgraph/drawio
+# Docs: https://github.com/jgraph/docker-drawio
+# No database, no persistent storage needed
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drawio
+  namespace: drawio
+  labels:
+    app.kubernetes.io/name: drawio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: drawio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: drawio
+    spec:
+      containers:
+        - name: drawio
+          image: jgraph/drawio:29.3.6
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10

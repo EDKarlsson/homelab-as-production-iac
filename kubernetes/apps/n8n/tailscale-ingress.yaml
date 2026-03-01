@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: n8n-tailscale
+  namespace: n8n
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: n8n
+      port:
+        number: 5678
+  tls:
+    - hosts:
+        - n8n

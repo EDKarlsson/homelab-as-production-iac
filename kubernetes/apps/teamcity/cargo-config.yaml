@@ -1,0 +1,21 @@
+# Cargo (Rust) proxy configuration for TeamCity build agents.
+# Mounted into agents at $CARGO_HOME/config.toml via subPath.
+#
+# Routes all crates.io downloads through the Nexus cargo-proxy repository.
+# Uses the sparse+ protocol (Nexus 3.x sparse index support) — faster than
+# the legacy git-based index.
+#
+# CARGO_HOME is set to /opt/cargo in the StatefulSet so the config lands
+# at /opt/cargo/config.toml and cargo writes its registry cache there too.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cargo-config
+  namespace: teamcity
+data:
+  config.toml: |
+    [source.crates-io]
+    replace-with = "nexus-proxy"
+
+    [source.nexus-proxy]
+    registry = "sparse+http://nexus-nexus-repository-manager.nexus.svc.cluster.local:8081/repository/cargo-proxy/"

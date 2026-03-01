@@ -1,0 +1,67 @@
+# Prometheus PVE Exporter — scrapes Proxmox VE API for cluster-wide metrics
+#
+# Prerequisites:
+#   1. Create a read-only PVE user for monitoring:
+#        pveum user add monitoring@pve
+#        pveum acl modify / --user monitoring@pve --role PVEAuditor
+#   2. Create an API token (no privilege separation):
+#        pveum user token add monitoring@pve exporter --privsep=0
+#   3. Create 1Password item "pve-exporter" in Homelab vault with fields:
+#        - user: monitoring@pve
+#        - token-name: exporter
+#        - token-value: <token-secret-from-step-2>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pve-exporter
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: pve-exporter
+    app.kubernetes.io/component: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pve-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pve-exporter
+        app.kubernetes.io/component: monitoring
+    spec:
+      containers:
+        - name: pve-exporter
+          image: prompve/prometheus-pve-exporter:3.8.1
+          args:
+            - --config.file=/etc/pve-exporter/pve.yml
+          ports:
+            - name: metrics
+              containerPort: 9221
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pve-exporter
+              readOnly: true
+      volumes:
+        - name: config
+          secret:
+            secretName: pve-exporter-config

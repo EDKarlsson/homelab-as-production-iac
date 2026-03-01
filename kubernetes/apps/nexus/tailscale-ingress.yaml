@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nexus-tailscale
+  namespace: nexus
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: nexus-nexus-repository-manager
+      port:
+        number: 8081
+  tls:
+    - hosts:
+        - nexus

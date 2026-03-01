@@ -1,0 +1,171 @@
+# ## Provide a name to substitute for the full names of resources
+# ##
+# fullnameOverride: kube-prometheus
+# cleanPrometheusOperatorObjectNames: true
+
+# ## Install Prometheus Operator CRDs
+# ##
+# crds:
+#   enabled: false
+
+# alertmanager:
+#   ingress:
+#     enabled: true
+
+#     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
+#     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
+#     ingressClassName: nginx
+#     annotations:
+#       cert-manager.io/cluster-issuer: ca-issuer
+#       gethomepage.dev/enabled: "true"
+#       gethomepage.dev/group: "Monitoring"
+#       gethomepage.dev/icon: alertmanager.png
+#       gethomepage.dev/name: Alertmanager
+#     hosts: &alert-mgr-hosts
+#       - alertmanager.seawolf.hermleigh.home
+#       - alertmanager.seawolf
+
+#     ## Paths to use for ingress rules - one path should match the alertmanagerSpec.routePrefix
+#     ##
+#     paths:
+#       - /
+
+#     ## For Kubernetes >= 1.18 you should specify the pathType (determines how Ingress paths should be matched)
+#     ## See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#better-path-matching-with-path-types
+#     pathType: Prefix
+
+#     ## TLS configuration for Alertmanager Ingress
+#     ## Secret must be manually created in the namespace
+#     ##
+#     tls:
+#       - secretName: alertmanager-general-tls
+#         hosts: *alert-mgr-hosts
+
+# grafana:
+#   defaultDashboardsTimezone: America/New_York
+#   persistence:
+#     enabled: true
+#     existingClaim: grafana
+#   ingress:
+#     enabled: true
+#     ingressClassName: nginx
+#     annotations:
+#       cert-manager.io/cluster-issuer: ca-issuer
+#       gethomepage.dev/enabled: "true"
+#       gethomepage.dev/group: "Monitoring"
+#       gethomepage.dev/icon: grafana.png
+#       gethomepage.dev/name: Grafana
+#     hosts: &grafana-hosts
+#       - grafana.seawolf.hermleigh.home
+#       - grafana.seawolf
+#     tls:
+#       - hosts: *grafana-hosts
+#         secretName: grafana-ingress-cert
+#   dashboardProviders:
+#     dashboardproviders.yaml:
+#       apiVersion: 1
+#       providers:
+#         - name: default
+#           orgId: 1
+#           folder: ''
+#           type: file
+#           disableDeletion: false
+#           editable: true
+#           options:
+#             path: /var/lib/grafana/dashboards/default
+#         - name: 'grafana-dashboards-kubernetes'
+#           orgId: 1
+#           folder: 'Kubernetes'
+#           type: file
+#           disableDeletion: true
+#           editable: true
+#           options:
+#             path: /var/lib/grafana/dashboards/grafana-dashboards-kubernetes
+#   dashboards:
+#     default:
+#         token: ''
+#         datasource: Prometheus
+#     grafana-dashboards-kubernetes:
+#       k8s-system-api-server:
+#         url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-system-api-server.json
+#         token: ''
+#       k8s-system-coredns:
+#         url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-system-coredns.json
+#         token: ''
+#       k8s-views-global:
+#         url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-global.json
+#         token: ''
+#       k8s-views-namespaces:
+#         url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-namespaces.json
+#         token: ''
+#       k8s-views-nodes:
+#         url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-nodes.json
+#         token: ''
+#       k8s-views-pods:
+#         url: https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-pods.json
+#         token: ''
+
+# ## Manages Prometheus and Alertmanager components
+# ##
+# prometheusOperator:
+#   enabled: true
+#   ## Admission webhook support for PrometheusRules resources added in Prometheus Operator 0.30 can be enabled to prevent incorrectly formatted
+#   ## rules from making their way into prometheus and potentially preventing the container from starting
+#   admissionWebhooks:
+#     # Use certmanager to generate webhook certs
+#     certManager:
+#       enabled: true
+#       issuerRef:
+#         name: "ca-issuer"
+#         kind: "ClusterIssuer"
+
+# prometheus:
+#   prometheusSpec:
+#     podMonitorSelectorNilUsesHelmValues: false
+#     serviceMonitorSelectorNilUsesHelmValues: false
+#     additionalScrapeConfigs:
+#       - job_name: "cri-o-exporter-parche"
+#         scrape_interval: 1s
+#         metrics_path: /parche
+#         static_configs:
+#           - targets: ["cri-o-metrics-exporter.cri-o-metrics-exporter"]
+#             labels:
+#               instance: "parche"
+#         static_configs:
+
+#   service:
+#     ingress:
+#       enabled: true
+#       ingressClassName: nginx
+#       annotations:
+#         cert-manager.io/cluster-issuer: ca-issuer
+#         gethomepage.dev/enabled: "true"
+#         gethomepage.dev/group: "Monitoring"
+#         gethomepage.dev/icon: prometheus.png
+#         gethomepage.dev/name: Prometheus
+#     hosts: &prom-hosts
+#       - prometheus.seawolf.hermleigh.home
+#       - prometheus.seawolf
+#     paths:
+#       - /
+#     pathType: Prefix
+#     tls:
+#       - secretName: prometheus-general-tls
+#         hosts: *prom-hosts
+
+# prometheus-node-exporter:
+#   prometheus:
+#     monitor:
+#       # from: https://github.com/prometheus-community/helm-charts/issues/3613#issuecomment-1837318437
+#       attachMetadata:
+#         node: true
+#       ## RelabelConfigs to apply to samples before scraping
+#       ## ref: https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/api.md#relabelconfig
+#       ##
+#       relabelings:
+#         - sourceLabels: [__meta_kubernetes_pod_node_name]
+#           separator: ;
+#           regex: ^(.*)$
+#           targetLabel: node
+#           replacement: $1
+#           action: replace

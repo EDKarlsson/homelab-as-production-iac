@@ -1,0 +1,23 @@
+---
+# Ansible Galaxy collection requirements
+# Install with: ansible-galaxy collection install -r ansible/requirements.yml
+#
+# After install, verify:
+#   ansible-galaxy collection list | grep -E "artis3n|onepassword|community.general"
+
+collections:
+  # K3s secrets lookups via op CLI (community.general.onepassword lookup plugin)
+  # Requires: op CLI in PATH, 1Password desktop app running (biometric auth)
+  - name: community.general
+    version: ">=8.1.0"
+
+  # Tailscale role — used by ansible/playbooks/pve.yml to install Tailscale on PVE hosts
+  - name: artis3n.tailscale
+
+  # PostgreSQL modules — used by ansible/playbooks/pg-create-db.yml for DB bootstrap
+  - name: community.postgresql
+
+  # 1Password Connect API collection — for future non-interactive / CI use.
+  # Uses OP_CONNECT_HOST + OP_CONNECT_TOKEN env vars (Connect server: https://op-connect.homelab.ts.net).
+  # Not yet actively used; lookups currently go via community.general.onepassword (op CLI).
+  - name: onepassword.connect

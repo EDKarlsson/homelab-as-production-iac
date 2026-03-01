@@ -1,0 +1,130 @@
+#!/bin/bash
+# PostgreSQL per-database backup script (Tier 2 — VM-level defense-in-depth)
+#
+# Tier 1 (K8s CronJob pg_dumpall) is the primary backup path with Prometheus alerting.
+# This script provides per-database dumps for selective restore and survives K8s outages.
+#
+# Deployed by: ansible-playbook playbooks/pg-backup.yml
+# Schedule:    {{ pg_backup_cron_schedule }} (via /etc/cron.d/pg-backup)
+# VIP guard:   Only executes on the current VIP holder ({{ pg_backup_vip }})
+
+set -euo pipefail
+
+BACKUP_DIR="{{ pg_backup_local_dir }}"
+NAS_MOUNT="{{ pg_backup_nas_mount }}"
+LOCAL_RETENTION={{ pg_backup_local_retention_days }}
+NAS_RETENTION={{ pg_backup_nas_retention_days }}
+VIP="{{ pg_backup_vip }}"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+HOSTNAME=$(hostname)
+STATUS_FILE="${BACKUP_DIR}/backup-status.json"
+ERRORS=()
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# --- VIP guard: only back up on the current primary ---
+if ! ip addr show | grep -q "${VIP}"; then
+    log "Not VIP holder (${VIP} not on this node). Skipping backup."
+    exit 0
+fi
+
+log "=== PostgreSQL backup starting on ${HOSTNAME} (VIP holder) ==="
+
+mkdir -p "${BACKUP_DIR}"
+
+# --- Dump each database individually ---
+declare -A DB_RESULTS
+{% for db in pg_databases %}
+DB="{{ db }}"
+BACKUP_FILE="${BACKUP_DIR}/${DB}-${TIMESTAMP}.sql.gz"
+log "Dumping ${DB}..."
+if sudo -u postgres pg_dump "${DB}" | gzip > "${BACKUP_FILE}"; then
+    SIZE=$(stat -c%s "${BACKUP_FILE}" 2>/dev/null || echo 0)
+    DB_RESULTS[${DB}]="ok:${SIZE}:${DB}-${TIMESTAMP}.sql.gz"
+    log "  OK ($(du -h "${BACKUP_FILE}" | cut -f1))"
+else
+    DB_RESULTS[${DB}]="failed:0:"
+    ERRORS+=("${DB}")
+    log "  FAILED"
+    rm -f "${BACKUP_FILE}"
+fi
+{% endfor %}
+
+# --- Local retention: prune old backups ---
+log "Pruning local backups older than ${LOCAL_RETENTION} days..."
+find "${BACKUP_DIR}" -name "*.sql.gz" -mtime +${LOCAL_RETENTION} -delete
+
+# --- NAS sync ---
+NAS_STATUS="skipped"
+if mountpoint -q "${NAS_MOUNT}" 2>/dev/null; then
+    NAS_DIR="${NAS_MOUNT}/${HOSTNAME}"
+    mkdir -p "${NAS_DIR}"
+
+    log "Syncing to NAS (${NAS_MOUNT})..."
+    SYNC_FAILED=false
+    for f in "${BACKUP_DIR}"/*-${TIMESTAMP}.sql.gz; do
+        [ -f "$f" ] || continue
+        if cp "$f" "${NAS_DIR}/"; then
+            log "  Copied $(basename "$f") to NAS"
+        else
+            log "  FAILED to copy $(basename "$f") to NAS"
+            SYNC_FAILED=true
+        fi
+    done
+
+    # NAS retention
+    log "Pruning NAS backups older than ${NAS_RETENTION} days..."
+    find "${NAS_DIR}" -name "*.sql.gz" -mtime +${NAS_RETENTION} -delete
+
+    if [ "${SYNC_FAILED}" = "true" ]; then
+        NAS_STATUS="partial"
+        ERRORS+=("nas-sync")
+    else
+        NAS_STATUS="ok"
+    fi
+else
+    log "WARNING: NAS not mounted at ${NAS_MOUNT}. Local backup only."
+    NAS_STATUS="not_mounted"
+fi
+
+# --- Write status file ---
+ERROR_JSON="[]"
+{% raw %}
+if [ ${#ERRORS[@]} -gt 0 ]; then
+    ERROR_JSON=$(printf '"%s",' "${ERRORS[@]}")
+    ERROR_JSON="[${ERROR_JSON%,}]"
+fi
+{% endraw %}
+
+DB_JSON="{"
+{% for db in pg_databases %}
+DB="{{ db }}"
+RESULT="${DB_RESULTS[${DB}]:-unknown:0:}"
+IFS=':' read -r STATUS SIZE FILE <<< "${RESULT}"
+DB_JSON+="\"${DB}\":{\"status\":\"${STATUS}\",\"size_bytes\":${SIZE:-0},\"file\":\"${FILE}\"},"
+{% endfor %}
+DB_JSON="${DB_JSON%,}}"
+
+cat > "${STATUS_FILE}" << STATUSEOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "hostname": "${HOSTNAME}",
+  "is_vip_holder": true,
+  "databases": ${DB_JSON},
+  "nas_sync": "${NAS_STATUS}",
+  "errors": ${ERROR_JSON}
+}
+STATUSEOF
+
+# --- Summary ---
+{% raw %}
+TOTAL_FAIL=${#ERRORS[@]}
+{% endraw %}
+TOTAL_OK=$(( {{ pg_databases | length }} - TOTAL_FAIL ))
+
+log "=== Backup complete: ${TOTAL_OK} ok, ${TOTAL_FAIL} failed, NAS: ${NAS_STATUS} ==="
+
+# Exit non-zero if any database failed (cron will log the failure)
+{% raw %}
+[ ${#ERRORS[@]} -eq 0 ] || exit 1
+{% endraw %}

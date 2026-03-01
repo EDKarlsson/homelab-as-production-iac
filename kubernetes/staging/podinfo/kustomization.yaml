@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Pull everything from the production base — namespace, repository, release.
+resources:
+  - ../../apps/podinfo
+  - servicemonitor.yaml
+
+# Override metadata.namespace on all resources (HelmRelease, etc.)
+# Note: this does NOT rename the Namespace resource itself — that needs
+# the JSON 6902 patch below.
+namespace: podinfo-staging
+
+patches:
+  # Rename the Namespace resource from "podinfo" → "podinfo-staging".
+  # The namespace: field above handles metadata.namespace on other resources,
+  # but Namespace.metadata.name is cluster-scoped and must be patched separately.
+  - target:
+      kind: Namespace
+      name: podinfo
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: podinfo-staging
+
+  # Scope the HelmRelease's sourceRef to the staging namespace.
+  # The HelmRepository lives in the same namespace as the release, so
+  # after the namespace override it's already correct — this is a no-op
+  # reminder that HelmRepositories are namespace-scoped in Flux.
+  # (Nothing to patch for podinfo since the chart ref uses kind: HelmRepository
+  #  which Flux resolves within the same namespace automatically.)

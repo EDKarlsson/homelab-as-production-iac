@@ -1,0 +1,170 @@
+#cloud-config
+hostname: ${hostname}
+fqdn: ${hostname}.${domain}
+
+users:
+  - name: ${username}
+    groups: [adm, sudo, docker]
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - gpg
+  - lsb-release
+  - pciutils
+  - qemu-guest-agent
+  - ubuntu-drivers-common
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  - path: /opt/comfyui/Dockerfile
+    owner: root:root
+    permissions: '0644'
+    content: |
+      FROM ${base_image}
+      ARG COMFYUI_REF
+      ENV DEBIAN_FRONTEND=noninteractive \
+          PIP_NO_CACHE_DIR=1 \
+          PYTHONUNBUFFERED=1
+
+      RUN apt-get update \
+          && apt-get install -y --no-install-recommends git libgl1 libglib2.0-0 \
+          && rm -rf /var/lib/apt/lists/*
+
+      RUN git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+          && cd /opt/ComfyUI \
+          && git checkout "$COMFYUI_REF" \
+          && pip install --no-cache-dir -r requirements.txt
+
+      WORKDIR /opt/ComfyUI
+      EXPOSE ${port}
+      CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "${port}"]
+
+  - path: /opt/comfyui/docker-compose.yml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      services:
+        comfyui:
+          build:
+            context: /opt/comfyui
+            dockerfile: Dockerfile
+            args:
+              COMFYUI_REF: "${source_ref}"
+          container_name: comfyui
+          restart: unless-stopped
+%{ if use_gpu ~}
+          gpus: all
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=all
+            - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+%{ endif ~}
+          ports:
+            - "${port}:${port}"
+          volumes:
+            - /opt/comfyui/data/input:/opt/ComfyUI/input
+            - /opt/comfyui/data/output:/opt/ComfyUI/output
+            - /opt/comfyui/data/models:/opt/ComfyUI/models
+            - /opt/comfyui/data/custom_nodes:/opt/ComfyUI/custom_nodes
+
+  - path: /usr/local/bin/setup-nvidia-runtime.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -uo pipefail
+
+      if ! lspci | grep -qi nvidia; then
+        echo "No NVIDIA GPU detected in guest; skipping NVIDIA runtime setup."
+        exit 0
+      fi
+
+      echo "NVIDIA GPU detected in guest; installing drivers and container toolkit."
+      ubuntu-drivers install || true
+
+      install -m 0755 -d /usr/share/keyrings
+      if ! curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+        gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      then
+        echo "Failed to fetch NVIDIA toolkit signing key; continuing without GPU container runtime."
+        exit 0
+      fi
+
+      if ! curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+      then
+        echo "Failed to configure NVIDIA toolkit apt repository; continuing without GPU container runtime."
+        exit 0
+      fi
+
+      if ! apt-get update; then
+        echo "apt-get update failed; continuing without GPU container runtime."
+        exit 0
+      fi
+
+      if ! apt-get install -y nvidia-container-toolkit; then
+        echo "Failed to install nvidia-container-toolkit; continuing without GPU container runtime."
+        exit 0
+      fi
+
+      if ! command -v nvidia-ctk >/dev/null 2>&1; then
+        echo "nvidia-ctk not found after toolkit install; continuing."
+        exit 0
+      fi
+
+      nvidia-ctk runtime configure --runtime=docker || true
+      systemctl restart docker
+
+  - path: /etc/systemd/system/comfyui.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=ComfyUI Docker Compose Stack
+      Requires=docker.service
+      After=network-online.target docker.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/comfyui
+      ExecStart=/usr/bin/docker compose -f /opt/comfyui/docker-compose.yml up -d --build
+      ExecStop=/usr/bin/docker compose -f /opt/comfyui/docker-compose.yml down
+      TimeoutStartSec=0
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - mkdir -p /opt/comfyui/data/input /opt/comfyui/data/output /opt/comfyui/data/models /opt/comfyui/data/custom_nodes
+  - chown -R ${username}:${username} /opt/comfyui/data
+  - usermod -aG docker ${username}
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now docker
+  - /usr/local/bin/setup-nvidia-runtime.sh
+  - systemctl daemon-reload
+  - systemctl enable --now comfyui
+
+final_message: |
+  ComfyUI VM bootstrap completed.
+
+  Access:
+  - URL: http://${ip_address}:${port}
+  - SSH: ssh ${username}@${ip_address}
+
+  Notes:
+  - ComfyUI runs via Docker Compose.
+  - Container image is built from upstream source ref: ${source_ref}
+  - If GPU passthrough is enabled, NVIDIA runtime setup is attempted automatically.

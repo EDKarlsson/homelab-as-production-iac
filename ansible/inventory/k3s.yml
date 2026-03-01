@@ -1,0 +1,48 @@
+# K3s Cluster Inventory
+# Asgard K3s Cluster — 3 servers + 5 agents + PostgreSQL HA (2 VMs)
+#
+# SSH access uses the 1Password SSH agent (homelab-k3s-cluster key).
+# Requires SSH_AUTH_SOCK=~/.1password/agent.sock (set in .env.d/base.env).
+# The .ssh/k3s-cluster.pub file pins IdentitiesOnly to avoid MaxAuthTries failures.
+
+k3s_cluster:
+  children:
+    k3s_servers:
+      hosts:
+        homelab-server-node-02:
+          ansible_host: 10.0.0.50
+        homelab-server-node-03:
+          ansible_host: 10.0.0.51
+        homelab-server-node-04:
+          ansible_host: 10.0.0.52
+
+    k3s_agents:
+      hosts:
+        homelab-agent-node-01:
+          ansible_host: 10.0.0.60
+        homelab-agent-node-05:
+          ansible_host: 10.0.0.61
+        homelab-agent-node-02:
+          ansible_host: 10.0.0.62
+        homelab-agent-node-03:
+          ansible_host: 10.0.0.63
+        homelab-agent-node-04:
+          ansible_host: 10.0.0.64
+
+    k3s_db:
+      hosts:
+        homelab-psql-dbs-k3s:
+          ansible_host: 10.0.0.45
+
+    pg_nodes:
+      hosts:
+        homelab-psql-primary:
+          ansible_host: 10.0.0.45
+        homelab-psql-standby:
+          ansible_host: 10.0.0.46
+
+  vars:
+    ansible_user: k3sadmin
+    ansible_connection: ssh
+    ansible_ssh_private_key_file: "{{ inventory_dir }}/../.ssh/k3s-cluster.pub"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o IdentitiesOnly=yes"

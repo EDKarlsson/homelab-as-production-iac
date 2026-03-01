@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: affine
+  namespace: affine
+  annotations:
+    cert-manager.io/cluster-issuer: homelab-ca-issuer
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # WebSocket support — required for AFFiNE real-time collaboration.
+    # proxy-set-headers is the snippet-free way to inject custom proxy headers.
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-set-headers: "affine/websocket-headers"
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: affine-tls
+      hosts:
+        - affine.10.0.0.201.nip.io
+  rules:
+    - host: affine.10.0.0.201.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: affine
+                port:
+                  number: 3010

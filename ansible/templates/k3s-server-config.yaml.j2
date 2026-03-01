@@ -1,0 +1,24 @@
+# K3s Server Configuration — managed by Ansible
+# See: https://docs.k3s.io/reference/server-config
+token: {{ k3s_cluster_token }}
+datastore-endpoint: {{ k3s_datastore_endpoint }}
+disable:
+{% for component in k3s_disable %}
+  - {{ component }}
+{% endfor %}
+cluster-cidr: "{{ k3s_cluster_cidr }}"
+service-cidr: "{{ k3s_service_cidr }}"
+cluster-dns: "{{ k3s_cluster_dns }}"
+cluster-domain: "cluster.local"
+node-name: {{ inventory_hostname }}
+node-ip: {{ ansible_host }}
+bind-address: {{ ansible_host }}
+advertise-address: {{ ansible_host }}
+tls-san:
+  - {{ ansible_host }}
+  - {{ inventory_hostname }}
+  - {{ inventory_hostname }}.homelab.local
+  - homelab-k3s-api.homelab.local
+write-kubeconfig-mode: "0644"
+protect-kernel-defaults: false
+secrets-encryption: true

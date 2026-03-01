@@ -1,0 +1,35 @@
+# Static NFS PV/PVC for Calibre library on Synology NAS
+# NFS export is /volume1/books; "Calibre Library" is a subfolder
+# Deployment uses subPath to mount only the "Calibre Library" dir
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: calibre-web-books
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: 10.0.0.161
+    path: /volume1/books
+    readOnly: false
+  claimRef:
+    name: calibre-web-books
+    namespace: calibre-web
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: calibre-web-books
+  namespace: calibre-web
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: calibre-web-books
+  resources:
+    requests:
+      storage: 500Gi

@@ -1,0 +1,24 @@
+# Homelab self-signed CA certificate — public, not sensitive.
+# Used by in-cluster services (OAuth2 Proxy, etc.) that need to trust
+# the homelab CA for TLS connections to *.10.0.0.201.nip.io ingresses.
+#
+# The cert is managed by cert-manager (secret: cert-manager/homelab-ca).
+# This ConfigMap is a read-only copy for pod consumption; it does not
+# need to be rotated unless the CA itself is regenerated.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homelab-ca-cert
+  namespace: oauth2-proxy
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIBajCCARCgAwIBAgIQcrAwy52SWx3fOtuTSaMdsDAKBggqhkjOPQQDAjAVMRMw
+    EQYDVQQDEwpIb21lbGFiIENBMB4XDTI2MDIxNjIzMjQzOFoXDTM2MDIxNDIzMjQz
+    OFowFTETMBEGA1UEAxMKSG9tZWxhYiBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEH
+    A0IABBhTk0GPOltg/HRvIEL1t+2WxnTI562uUxBC4rNH+m4F9nKl9XmjWgsg3pkf
+    pGADtRMwFbL4niFJCG5NN5TT+ACjQjBAMA4GA1UdDwEB/wQEAwICpDAPBgNVHRMB
+    Af8EBTADAQH/MB0GA1UdDgQWBBTGMqQ7eYBoSik03sAGBXxcFhWc7TAKBggqhkjO
+    PQQDAgNIADBFAiEArlouB7CdA5XqtOM75BKXh7fvtw0dRBvdMWHwK483ORACIFwe
+    MUq5oh77s4OUFH6R/op/V3VG2TWUY8bNYYI9ssN7
+    -----END CERTIFICATE-----

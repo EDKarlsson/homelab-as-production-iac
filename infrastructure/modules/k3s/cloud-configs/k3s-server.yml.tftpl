@@ -1,0 +1,180 @@
+#cloud-config
+# K3s Server Node Configuration Template
+# Norse-themed Asgard K3s Cluster - Control Plane Node
+
+hostname: ${hostname}
+fqdn: ${hostname}.homelab.local
+
+users:
+  - name: ${username}
+    groups: [adm, sudo]
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# APT configuration — optionally route through Nexus proxy cache
+# Prerequisite: apt-ubuntu and apt-ubuntu-security proxy repos must exist
+# in Nexus before provisioning VMs with this enabled.
+# Run scripts/nexus/configure-proxy-repos.sh first.
+%{ if nexus_apt_mirror_url != "" ~}
+apt:
+  primary:
+    - arches: [amd64, i386]
+      uri: ${nexus_apt_mirror_url}/repository/apt-ubuntu/
+  security:
+    - arches: [amd64, i386]
+      uri: ${nexus_apt_mirror_url}/repository/apt-ubuntu-security/
+%{ endif ~}
+
+# Package updates and installations
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - wget
+  - jq
+  - htop
+  - net-tools
+  - unzip
+  - git
+  - nfs-common
+  - qemu-guest-agent
+
+
+runcmd:
+  # Disable swap permanently
+  - swapoff -a
+  - sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+  
+  # Configure kernel modules for Kubernetes
+  - modprobe br_netfilter
+  - modprobe ip_vs
+  - modprobe ip_vs_rr
+  - modprobe ip_vs_wrr
+  - modprobe ip_vs_sh
+  - modprobe nf_conntrack
+  
+  # Create modules-load configuration
+  - |
+    cat > /etc/modules-load.d/k3s.conf << EOF
+    br_netfilter
+    ip_vs
+    ip_vs_rr
+    ip_vs_wrr  
+    ip_vs_sh
+    nf_conntrack
+    EOF
+  
+  # Configure sysctl for Kubernetes
+  - |
+    cat > /etc/sysctl.d/k3s.conf << EOF
+    net.bridge.bridge-nf-call-ip6tables = 1
+    net.bridge.bridge-nf-call-iptables = 1
+    net.ipv4.ip_forward = 1
+    EOF
+  - sysctl --system
+  
+  # Create K3s configuration directory
+  - mkdir -p /etc/rancher/k3s
+  
+  # Configure K3s server
+  - |
+    cat > /etc/rancher/k3s/config.yaml << EOF
+    token: ${k3s_token}
+    datastore-endpoint: postgres://k3s:${postgres_password}@${postgres_ip}:5432/k3s
+    disable:
+      - traefik
+    cluster-cidr: "10.42.0.0/16"
+    service-cidr: "10.43.0.0/16" 
+    cluster-dns: "10.43.0.10"
+    cluster-domain: "cluster.local"
+    node-name: ${hostname}
+    node-ip: ${server_ip}
+    bind-address: ${server_ip}
+    advertise-address: ${server_ip}
+    tls-san:
+      - ${server_ip}
+      - ${hostname}
+      - ${hostname}.homelab.local
+      - asgard-k3s-api.homelab.local
+    write-kubeconfig-mode: "0644"
+    protect-kernel-defaults: false
+    secrets-encryption: true
+    EOF
+  
+  # Download and install K3s
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${k3s_version} sh -s - server
+  
+  # Wait for K3s to be ready
+  - |
+    until systemctl is-active --quiet k3s; do
+      echo "Waiting for K3s to start..."
+      sleep 5
+    done
+  
+  # Wait for node to be ready
+  - |
+    until kubectl get nodes | grep -q Ready; do
+      echo "Waiting for K3s node to be ready..."
+      sleep 10
+    done
+  
+  # Set up kubectl for default user
+  - mkdir -p /home/${username}/.kube
+  - cp /etc/rancher/k3s/k3s.yaml /home/${username}/.kube/config
+  - chown -R ${username}:${username} /home/${username}/.kube
+  - chmod 600 /home/${username}/.kube/config
+  
+  # Create kubectl alias
+  - echo 'alias k=kubectl' >> /home/${username}/.bashrc
+  - echo 'complete -F __start_kubectl k' >> /home/${username}/.bashrc
+
+write_files:
+  - path: /etc/systemd/system/k3s-wait.service
+    content: |
+      [Unit]
+      Description=Wait for K3s to be ready
+      After=k3s.service
+      Requires=k3s.service
+      
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash -c 'until kubectl get nodes >/dev/null 2>&1; do sleep 5; done'
+      RemainAfterExit=yes
+      
+      [Install]
+      WantedBy=multi-user.target
+    permissions: '0644'
+
+  - path: /etc/logrotate.d/k3s
+    content: |
+      /var/log/k3s.log {
+        daily
+        missingok
+        rotate 7
+        compress
+        delaycompress
+        notifempty
+        copytruncate
+      }
+    permissions: '0644'
+
+final_message: |
+  K3s Server Node ${hostname} installation completed!
+  
+  Cluster Information:
+  - Node Name: ${hostname}
+  - Node IP: ${server_ip}
+  - Database: postgres://k3s@${postgres_ip}:5432/k3s
+  
+  Access:
+  - SSH: ssh ${username}@${server_ip}
+  - kubectl: Available for user ${username}
+  
+  Next Steps:
+  - Verify cluster status: kubectl get nodes
+  - Install ingress controller and other components
+  - Configure monitoring and logging

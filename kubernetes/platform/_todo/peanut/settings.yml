@@ -1,0 +1,5 @@
+NUT_SERVERS:
+  - HOST: leviathan
+    PORT: 3493
+    USERNAME: monuser
+    PASSWORD: secret

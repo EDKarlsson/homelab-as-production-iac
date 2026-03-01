@@ -1,0 +1,188 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+spec:
+  interval: 1h
+  chartRef:
+    kind: OCIRepository
+    name: kube-prometheus-stack
+  install:
+    crds: Create
+  upgrade:
+    crds: CreateReplace
+  driftDetection:
+    mode: enabled
+    ignore:
+      # Ignore "validated" annotation which is not inserted during install
+      - paths: [ "/metadata/annotations/prometheus-operator-validated" ]
+        target:
+          kind: PrometheusRule
+  valuesFrom:
+  - kind: ConfigMap
+    name: flux-kube-state-metrics-config
+    valuesKey: kube-state-metrics-config.yaml
+  - kind: Secret
+    name: grafana-admin
+    valuesKey: admin-password
+    targetPath: grafana.adminPassword
+    optional: true
+  - kind: Secret
+    name: alertmanager-slack
+    valuesKey: webhook-url
+    targetPath: alertmanager.config.global.slack_api_url
+    optional: true
+  # https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/values.yaml
+  values:
+    # K3s bundles scheduler, controller-manager, and proxy into the server
+    # binary — there are no separate pods/endpoints to scrape. Disabling
+    # these removes broken ServiceMonitors and misleading empty dashboards.
+    kubeScheduler:
+      enabled: false
+    kubeProxy:
+      enabled: false
+    kubeControllerManager:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+    alertmanager:
+      enabled: true
+      alertmanagerSpec:
+        storage:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: nfs-kubernetes
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 1Gi
+      config:
+        global:
+          resolve_timeout: 5m
+          # slack_api_url injected by valuesFrom (alertmanager-slack Secret)
+        route:
+          group_by: ["namespace", "alertname"]
+          group_wait: 30s
+          group_interval: 5m
+          repeat_interval: 4h
+          receiver: "null"
+          routes:
+            - receiver: "null"
+              matchers:
+                - alertname = "Watchdog"
+            - receiver: slack-critical
+              matchers:
+                - severity = "critical"
+              repeat_interval: 1h
+            - receiver: slack-notifications
+              matchers:
+                - severity = "warning"
+        # Suppress info-severity alerts when InfoInhibitor is firing in the same
+        # namespace. InfoInhibitor fires whenever any severity=info alert exists —
+        # its purpose is to be the source for this rule. Without it, a future
+        # severity=info receiver route would be bypassed by all info alerts.
+        inhibit_rules:
+          - source_matchers:
+              - 'alertname = "InfoInhibitor"'
+            target_matchers:
+              - 'severity = "info"'
+            equal:
+              - namespace
+        receivers:
+          - name: "null"
+          - name: slack-notifications
+            slack_configs:
+              - channel: "#homelab-alerts"
+                send_resolved: true
+                title: '{{ template "slack.default.title" . }}'
+                text: >-
+                  {{ range .Alerts -}}
+                  *Alert:* {{ .Annotations.summary }}
+                  *Severity:* {{ .Labels.severity }}
+                  *Namespace:* {{ .Labels.namespace }}
+                  *Description:* {{ .Annotations.description }}
+                  {{ end }}
+          - name: slack-critical
+            slack_configs:
+              - channel: "#homelab-alerts"
+                send_resolved: true
+                title: '🚨 {{ template "slack.default.title" . }}'
+                text: >-
+                  {{ range .Alerts -}}
+                  *CRITICAL Alert:* {{ .Annotations.summary }}
+                  *Namespace:* {{ .Labels.namespace }}
+                  *Description:* {{ .Annotations.description }}
+                  {{ end }}
+    prometheus:
+      prometheusSpec:
+        retention: 24h
+        resources:
+          requests:
+            cpu: 200m
+            memory: 200Mi
+        podMonitorNamespaceSelector: { }
+        # Discover ServiceMonitors in all namespaces (e.g., nexus, velero, media).
+        # Safe for single-tenant homelab — no untrusted namespace operators.
+        serviceMonitorNamespaceSelector: { }
+        # Discover ALL ServiceMonitors — removes the default requirement for
+        # label release: kube-prometheus-stack on custom monitors (pve-exporter,
+        # github-actions-exporter, velero, nexus, etc.).
+        # serviceMonitorSelectorNilUsesHelmValues must be false; otherwise the chart
+        # treats an empty selector as nil and re-applies the release label filter.
+        serviceMonitorSelectorNilUsesHelmValues: false
+        serviceMonitorSelector: { }
+        podMonitorSelector:
+          matchLabels:
+            app.kubernetes.io/component: monitoring
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: nfs-kubernetes
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+    grafana:
+      defaultDashboardsEnabled: true
+      adminPassword: flux # fallback — overridden by grafana-admin ExternalSecret when ESO is active
+      persistence:
+        enabled: true
+        storageClassName: nfs-kubernetes
+        size: 2Gi
+      envFromSecret: "grafana-keycloak-oidc"
+
+      extraVolumes:
+        - name: homelab-ca
+          configMap:
+            name: homelab-ca-cert
+      extraVolumeMounts:
+        - name: homelab-ca
+          mountPath: /etc/ssl/homelab
+          readOnly: true
+
+      grafana.ini:
+        server:
+          root_url: "https://grafana.homelab.ts.net"
+        auth.generic_oauth:
+          enabled: true
+          name: Keycloak
+          allow_sign_up: true
+          auto_login: true
+          scopes: "openid profile email"
+          auth_url: "https://keycloak.homelab.ts.net/auth/realms/homelab/protocol/openid-connect/auth"
+          token_url: "https://keycloak.homelab.ts.net/auth/realms/homelab/protocol/openid-connect/token"
+          api_url: "https://keycloak.homelab.ts.net/auth/realms/homelab/protocol/openid-connect/userinfo"
+          role_attribute_path: "'Admin'"
+          tls_client_ca: /etc/ssl/homelab/ca.crt
+
+      ingress:
+        enabled: true
+        ingressClassName: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: homelab-ca-issuer
+        hosts:
+          - grafana.10.0.0.201.nip.io
+        tls:
+          - secretName: grafana-tls
+            hosts:
+              - grafana.10.0.0.201.nip.io

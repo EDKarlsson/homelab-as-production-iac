@@ -1,0 +1,110 @@
+---
+# Deploy containerd registry mirrors pointing to Nexus proxy cache
+#
+# Configures all K3s nodes (servers + agents) to pull container images
+# through Nexus, reducing external bandwidth and improving pull speed.
+#
+# Prerequisites:
+#   - Nexus must be accessible from K3s hosts via nexus_registry_url
+#     (host network, NOT cluster-internal DNS — containerd can't resolve *.svc.cluster.local)
+#   - Docker proxy repos (docker-hub, docker-ghcr, docker-quay) must exist in Nexus
+#     (run scripts/nexus/configure-proxy-repos.sh first)
+#
+# Usage:
+#   export SSH_AUTH_SOCK=~/.1password/agent.sock
+#   ansible-playbook -i inventory/k3s.yml playbooks/k3s-registry-mirrors.yml \
+#     -e nexus_registry_url=<host-accessible-nexus-address> --forks=1
+#
+# Note: --forks=1 is redundant with serial: 1, but kept for consistency
+# with other playbooks that require it for 1Password SSH agent approval flow.
+#
+# WARNING: This playbook uses --disable-eviction during drain, which bypasses
+# ALL PodDisruptionBudgets (not just Longhorn). Safe for homelab use, but review
+# any application PDBs before running in environments with HA service requirements.
+
+- name: Deploy K3s containerd registry mirrors
+  hosts: k3s_servers:k3s_agents
+  become: true
+  serial: 1
+  vars:
+    # IMPORTANT: Must be a host-network-accessible URL (IP:port or DNS name).
+    # Containerd runs on the host, NOT in a pod — it cannot resolve
+    # *.svc.cluster.local names. Options:
+    #   - NodePort:     "<any-node-ip>:<nodeport>"
+    #   - LoadBalancer:  "<metallb-vip>:<port>"
+    #   - Ingress (no auth): "<nexus-host>:<port>"
+    # Pass via --extra-vars or define in inventory/group_vars/k3s_cluster.yml.
+    nexus_registry_url: "{{ nexus_registry_mirror_url | default('') }}"
+  tasks:
+    - name: Validate nexus_registry_url is set
+      ansible.builtin.assert:
+        that:
+          - nexus_registry_url | length > 0
+        fail_msg: >-
+          nexus_registry_url is empty. Set nexus_registry_mirror_url via
+          --extra-vars or in group_vars. Must be a host-network-accessible
+          address (e.g. 10.0.0.201:30081), NOT cluster-internal DNS.
+
+    - name: Deploy registries.yaml
+      ansible.builtin.template:
+        # playbook_dir is ansible/playbooks/; dirname steps up to ansible/
+        # giving us ansible/templates/ without a relative ../ path that
+        # triggers ansible-lint no-relative-paths.
+        src: "{{ playbook_dir | dirname }}/templates/k3s-registries.yaml.j2"
+        dest: /etc/rancher/k3s/registries.yaml
+        owner: root
+        group: root
+        mode: "0644"
+      register: registries_config
+
+    - name: Set restart requirement flag
+      ansible.builtin.set_fact:
+        restart_required: "{{ registries_config.changed }}"
+
+    - name: Determine K3s service name
+      # K3s servers run the 'k3s' service, agents run 'k3s-agent'.
+      # group_names is authoritative here — inventory group membership
+      # (k3s_servers vs k3s_agents) defines the node role.
+      ansible.builtin.set_fact:
+        k3s_service: "{{ 'k3s' if 'k3s_servers' in group_names else 'k3s-agent' }}"
+
+    - name: Drain node before restart
+      ansible.builtin.command: >
+        k3s kubectl drain {{ inventory_hostname }}
+        --ignore-daemonsets
+        --delete-emptydir-data
+        --disable-eviction
+        --timeout=300s
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      changed_when: true
+      when: restart_required
+      # --disable-eviction: bypasses PodDisruptionBudget checks by using pod DELETE
+      # instead of Eviction API. Required because Longhorn instance-manager PDBs have
+      # minAvailable=1 with only 1 replica, resulting in 0 allowed disruptions.
+      # Longhorn volumes remain safe — replicas exist on other nodes.
+      # --timeout=300s: increased from 120s to handle slow-terminating pods (e.g. JupyterLab).
+
+    - name: Restart K3s to pick up registry mirrors
+      ansible.builtin.systemd:
+        name: "{{ k3s_service }}"
+        state: restarted
+      when: restart_required
+
+    - name: Wait for node to report Ready
+      ansible.builtin.command: >
+        k3s kubectl get node {{ inventory_hostname }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+      when: restart_required
+
+    - name: Uncordon node after restart
+      ansible.builtin.command: >
+        k3s kubectl uncordon {{ inventory_hostname }}
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      changed_when: true
+      when: restart_required

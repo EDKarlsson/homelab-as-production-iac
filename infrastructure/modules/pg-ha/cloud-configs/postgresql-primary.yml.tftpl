@@ -1,0 +1,401 @@
+#cloud-config
+# PostgreSQL Primary — HA cluster with streaming replication + keepalived VIP
+# Evolved from single-node template; adds replication user, WAL config, keepalived
+
+hostname: ${hostname}
+fqdn: ${hostname}.homelab.local
+
+users:
+  - name: ${username}
+    groups: [adm, sudo]
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - postgresql
+  - postgresql-contrib
+  - postgresql-client
+  - keepalived
+  - curl
+  - wget
+  - jq
+  - htop
+  - net-tools
+  - unzip
+  - git
+  - logrotate
+  - nfs-common
+  - qemu-guest-agent
+
+runcmd:
+  # --- Partition and mount data disk ---
+  - |
+    parted /dev/sdb --script mklabel gpt
+    parted -a optimal /dev/sdb --script mkpart primary ext4 0% 100%
+    mkfs.ext4 /dev/sdb1
+    mkdir -p /mnt/data
+    DB_UUID=$(blkid -s UUID -o value /dev/sdb1)
+    echo "UUID=$DB_UUID /mnt/data ext4 defaults 0 2" >> /etc/fstab
+    mount -a
+
+  # --- Move PostgreSQL data directory to data disk ---
+  - |
+    systemctl stop postgresql
+    mv /var/lib/postgresql /mnt/data/postgresql
+
+  - |
+    chown -R postgres:postgres /mnt/data
+    chmod 700 /mnt/data/postgresql
+    psql_version=$(psql -V | awk '{print $3}' | cut -d. -f1)
+    sed -i "s|data_directory = .*|data_directory = '/mnt/data/postgresql/$psql_version/main'|" /etc/postgresql/$psql_version/main/postgresql.conf
+
+  # --- Start PostgreSQL ---
+  - systemctl start postgresql
+  - systemctl enable postgresql
+
+  # --- Set postgres superuser password ---
+  - |
+    sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${postgres_password}';"
+
+  # --- Create application databases and users ---
+  - |
+    sudo -u postgres createdb k3s
+    sudo -u postgres psql -c "CREATE USER k3s WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE k3s TO k3s;"
+    sudo -u postgres psql -d k3s -c "GRANT ALL ON SCHEMA public TO k3s;"
+    sudo -u postgres psql -d k3s -c "GRANT CREATE ON SCHEMA public TO k3s;"
+
+  - |
+    sudo -u postgres createdb terraform_state
+    sudo -u postgres psql -c "CREATE USER terraform WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE terraform_state TO terraform;"
+    sudo -u postgres psql -d terraform_state -c "GRANT ALL ON SCHEMA public TO terraform;"
+    sudo -u postgres psql -d terraform_state -c "GRANT CREATE ON SCHEMA public TO terraform;"
+
+  - |
+    sudo -u postgres createdb keycloak
+    sudo -u postgres psql -c "CREATE USER keycloak WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak;"
+    sudo -u postgres psql -d keycloak -c "GRANT ALL ON SCHEMA public TO keycloak;"
+    sudo -u postgres psql -d keycloak -c "GRANT CREATE ON SCHEMA public TO keycloak;"
+
+  - |
+    sudo -u postgres createdb n8n
+    sudo -u postgres psql -c "CREATE USER n8n WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
+    sudo -u postgres psql -d n8n -c "GRANT ALL ON SCHEMA public TO n8n;"
+    sudo -u postgres psql -d n8n -c "GRANT CREATE ON SCHEMA public TO n8n;"
+
+  - |
+    sudo -u postgres createdb wikijs
+    sudo -u postgres psql -c "CREATE USER wikijs WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE wikijs TO wikijs;"
+    sudo -u postgres psql -d wikijs -c "GRANT ALL ON SCHEMA public TO wikijs;"
+    sudo -u postgres psql -d wikijs -c "GRANT CREATE ON SCHEMA public TO wikijs;"
+
+  - |
+    sudo -u postgres createdb teamcity
+    sudo -u postgres psql -c "CREATE USER teamcity WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE teamcity TO teamcity;"
+    sudo -u postgres psql -d teamcity -c "GRANT ALL ON SCHEMA public TO teamcity;"
+    sudo -u postgres psql -d teamcity -c "GRANT CREATE ON SCHEMA public TO teamcity;"
+
+  - |
+    sudo -u postgres createdb coder
+    sudo -u postgres psql -c "CREATE USER coder WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE coder TO coder;"
+    sudo -u postgres psql -d coder -c "GRANT ALL ON SCHEMA public TO coder;"
+    sudo -u postgres psql -d coder -c "GRANT CREATE ON SCHEMA public TO coder;"
+
+  - |
+    sudo -u postgres createdb windmill
+    sudo -u postgres psql -c "CREATE USER windmill WITH ENCRYPTED PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE windmill TO windmill;"
+    sudo -u postgres psql -d windmill -c "GRANT ALL ON SCHEMA public TO windmill;"
+    sudo -u postgres psql -d windmill -c "GRANT CREATE ON SCHEMA public TO windmill;"
+    sudo -u postgres psql -c "CREATE ROLE windmill_admin;"
+    sudo -u postgres psql -c "CREATE ROLE windmill_user;"
+    sudo -u postgres psql -c "GRANT ALL ON DATABASE windmill TO windmill_admin;"
+    sudo -u postgres psql -d windmill -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO windmill;"
+    sudo -u postgres psql -d windmill -c "GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO windmill;"
+    sudo -u postgres psql -d windmill -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO windmill_admin;"
+    sudo -u postgres psql -d windmill -c "GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO windmill_admin;"
+
+  # --- Create replication user ---
+  - |
+    sudo -u postgres psql -c "CREATE USER replicator REPLICATION LOGIN ENCRYPTED PASSWORD '${replication_password}';"
+
+  # --- Create monitoring user ---
+  - |
+    sudo -u postgres psql -c "CREATE USER monitoring WITH PASSWORD '${postgres_password}';"
+    sudo -u postgres psql -c "GRANT CONNECT ON DATABASE k3s TO monitoring;"
+    sudo -u postgres psql -c "GRANT pg_monitor TO monitoring;"
+
+  # --- Configure PostgreSQL for HA ---
+  - |
+    PG_VERSION=$(sudo -u postgres psql -t -c "SELECT version();" | grep -oP 'PostgreSQL \K[0-9]+')
+    PG_CONFIG_DIR="/etc/postgresql/$PG_VERSION/main"
+
+    # Listen on all interfaces
+    sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONFIG_DIR/postgresql.conf"
+    sed -i "s/#port = 5432/port = 5432/" "$PG_CONFIG_DIR/postgresql.conf"
+
+    # Performance + replication settings
+    cat >> "$PG_CONFIG_DIR/postgresql.conf" << EOF
+
+    # Performance tuning
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    work_mem = 4MB
+    maintenance_work_mem = 64MB
+    max_connections = 100
+
+    # Write-ahead logging (HA replication)
+    wal_level = replica
+    max_wal_senders = 3
+    wal_keep_size = 256MB
+    max_wal_size = 1GB
+    min_wal_size = 80MB
+
+    # Checkpoints
+    checkpoint_completion_target = 0.7
+    checkpoint_timeout = 5min
+
+    # Logging
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = 'log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_file_mode = 0600
+    log_rotation_age = 1d
+    log_rotation_size = 10MB
+    log_min_duration_statement = 1000
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    EOF
+
+  # --- Configure client authentication (pg_hba.conf) ---
+  - |
+    PG_VERSION=$(sudo -u postgres psql -t -c "SELECT version();" | grep -oP 'PostgreSQL \K[0-9]+')
+    PG_HBA_FILE="/etc/postgresql/$PG_VERSION/main/pg_hba.conf"
+    cp "$PG_HBA_FILE" "$PG_HBA_FILE.backup"
+
+    cat > "$PG_HBA_FILE" << EOF
+    # PostgreSQL Client Authentication Configuration File
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+
+    # Local connections
+    local   all             postgres                                peer
+    local   all             all                                     peer
+
+    # IPv4 local connections
+    host    all             postgres        127.0.0.1/32           md5
+    host    all             all             127.0.0.1/32           md5
+
+    # Replication connections (standby node)
+    host    replication     replicator      192.168.2.0/24          md5
+
+    # Application connections (VLAN02-Homelab: 192.168.2.0/24)
+    host    k3s             k3s             192.168.2.0/24          md5
+    host    terraform_state terraform       192.168.2.0/24          md5
+    host    keycloak        keycloak        192.168.2.0/24          md5
+    host    n8n             n8n             192.168.2.0/24          md5
+    host    wikijs          wikijs          192.168.2.0/24          md5
+    host    teamcity        teamcity        192.168.2.0/24          md5
+    host    coder           coder           192.168.2.0/24          md5
+    host    windmill        windmill        192.168.2.0/24          md5
+    host    all             postgres        192.168.2.0/24          md5
+
+    # IPv6 local connections
+    host    all             all             ::1/128                 md5
+    EOF
+
+  # --- Mount NAS for backup storage ---
+  - |
+    mkdir -p /mnt/nas-backups
+    echo "192.168.2.161:/volume1/postgresql-backups /mnt/nas-backups nfs defaults,nofail,soft,timeo=30,retrans=3 0 0" >> /etc/fstab
+    mount -a || true
+
+  # --- Create backup script (Tier 2 — per-database dumps with VIP guard) ---
+  - |
+    cat > /usr/local/bin/backup-pg-dbs.sh << 'SCRIPT'
+    #!/bin/bash
+    set -euo pipefail
+    BACKUP_DIR="/var/backups/postgresql"
+    NAS_MOUNT="/mnt/nas-backups"
+    LOCAL_RETENTION=7
+    NAS_RETENTION=30
+    VIP="${vip}"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    HOSTNAME=$(hostname)
+    ERRORS=()
+
+    log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+    # VIP guard: only back up on the current primary
+    if ! ip addr show | grep -q "$VIP"; then
+        log "Not VIP holder ($VIP not on this node). Skipping backup."
+        exit 0
+    fi
+
+    log "=== PostgreSQL backup starting on $HOSTNAME (VIP holder) ==="
+    mkdir -p "$BACKUP_DIR"
+
+    for db in k3s terraform_state keycloak n8n wikijs teamcity coder windmill; do
+      log "Dumping $db..."
+      BACKUP_FILE="$BACKUP_DIR/$db-$TIMESTAMP.sql.gz"
+      if sudo -u postgres pg_dump "$db" | gzip > "$BACKUP_FILE"; then
+        log "  OK ($(du -h "$BACKUP_FILE" | cut -f1))"
+      else
+        ERRORS+=("$db")
+        log "  FAILED"
+        rm -f "$BACKUP_FILE"
+      fi
+    done
+
+    # Local retention
+    find "$BACKUP_DIR" -name "*.sql.gz" -mtime +$LOCAL_RETENTION -delete
+
+    # NAS sync (if mounted)
+    if mountpoint -q "$NAS_MOUNT" 2>/dev/null; then
+      NAS_DIR="$NAS_MOUNT/$HOSTNAME"
+      mkdir -p "$NAS_DIR"
+      for f in "$BACKUP_DIR"/*-$TIMESTAMP.sql.gz; do
+        [ -f "$f" ] && cp "$f" "$NAS_DIR/" && log "  Copied $(basename "$f") to NAS"
+      done
+      find "$NAS_DIR" -name "*.sql.gz" -mtime +$NAS_RETENTION -delete
+    else
+      log "WARNING: NAS not mounted at $NAS_MOUNT. Local backup only."
+    fi
+
+    log "=== Backup complete: $${#ERRORS[@]} errors ==="
+    [ $${#ERRORS[@]} -eq 0 ] || exit 1
+    SCRIPT
+    chmod +x /usr/local/bin/backup-pg-dbs.sh
+
+  # --- Restart PostgreSQL to apply all configuration ---
+  - systemctl restart postgresql
+
+  # --- Configure keepalived ---
+  - |
+    cat > /usr/local/bin/pg-health-check.sh << 'SCRIPT'
+    #!/bin/bash
+    # Returns 0 if PG is accepting connections (running), 1 otherwise.
+    # Role detection is NOT checked here — keepalived priorities handle
+    # VIP placement, notify script handles promotion.
+    pg_isready -q || exit 1
+    exit 0
+    SCRIPT
+    chmod +x /usr/local/bin/pg-health-check.sh
+
+  - |
+    cat > /usr/local/bin/keepalived-notify.sh << 'SCRIPT'
+    #!/bin/bash
+    # Called by keepalived on state transitions
+    TYPE=$1   # INSTANCE
+    NAME=$2   # VI_POSTGRES
+    STATE=$3  # MASTER|BACKUP|FAULT
+
+    case $STATE in
+      MASTER)
+        if sudo -u postgres psql -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | grep -q "t"; then
+          PG_VERSION=$(pg_lsclusters -h | awk '{print $1}')
+          sudo -u postgres pg_ctlcluster "$PG_VERSION" main promote
+          logger "keepalived: PostgreSQL PROMOTED to primary"
+        else
+          logger "keepalived: PostgreSQL already primary, VIP acquired"
+        fi
+        ;;
+      BACKUP|FAULT)
+        logger "keepalived: PostgreSQL entering $STATE state"
+        ;;
+    esac
+    SCRIPT
+    chmod +x /usr/local/bin/keepalived-notify.sh
+
+  - systemctl enable --now keepalived
+
+  # --- Verify PostgreSQL is running ---
+  - |
+    sleep 5
+    sudo -u postgres psql -d k3s -c "SELECT version();"
+    echo "PostgreSQL primary configuration completed!"
+
+write_files:
+  - path: /etc/keepalived/keepalived.conf
+    content: |
+      vrrp_script check_postgres {
+          script "/usr/local/bin/pg-health-check.sh"
+          interval 5
+          weight -20
+          fall 2
+          rise 2
+          user root
+      }
+
+      vrrp_instance VI_POSTGRES {
+          state ${keepalived_state}
+          interface eth0
+          virtual_router_id 44
+          priority ${keepalived_priority}
+          advert_int 1
+          nopreempt
+
+          unicast_src_ip ${node_ip}
+          unicast_peer {
+              ${peer_ip}
+          }
+
+          authentication {
+              auth_type PASS
+              auth_pass pgha44
+          }
+
+          virtual_ipaddress {
+              ${vip}/24
+          }
+
+          track_script {
+              check_postgres
+          }
+
+          notify /usr/local/bin/keepalived-notify.sh
+      }
+    permissions: '0644'
+
+  - path: /etc/cron.d/pg-backup
+    content: |
+      # PostgreSQL per-database backup (Tier 2)
+      # VIP guard ensures only the current primary executes
+      0 */6 * * * root /usr/local/bin/backup-pg-dbs.sh >> /var/log/pg-backup.log 2>&1
+    permissions: '0644'
+
+
+  - path: /etc/logrotate.d/pg-backup
+    content: |
+      /var/log/pg-backup.log {
+        daily
+        missingok
+        rotate 30
+        compress
+        delaycompress
+        notifempty
+        copytruncate
+      }
+    permissions: '0644'
+
+final_message: |
+  PostgreSQL Primary ${hostname} installation completed!
+
+  HA Configuration:
+  - Role: Primary (${keepalived_state})
+  - Node IP: ${node_ip}
+  - VIP: ${vip}
+  - Databases: k3s, terraform_state, keycloak, n8n, wikijs, teamcity, coder, windmill
+  - Replication user: replicator
+  - Backup: every 6h to /var/backups/postgresql/ + NAS sync

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dependency-track-data
+  namespace: dependency-track
+spec:
+  storageClassName: nfs-kubernetes
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
